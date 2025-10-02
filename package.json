@@ -16,6 +16,10 @@
       {
         "command": "modulemanager.helloWorld",
         "title": "Hello World"
+      },
+      {
+        "command": "modulemanager.createDirectory",
+        "title": "Create Directory"
       }
     ]
   },
