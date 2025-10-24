@@ -14,14 +14,14 @@
   "contributes": {
     "commands": [
       {
-        "command": "modulemanager.createDirectory",
-        "title": "Create Directory"
+        "command": "modulemanager.createModule",
+        "title": "Create Module"
       }
     ],
     "menus": { 
       "explorer/context": [
         {
-          "command": "modulemanager.createDirectory",
+          "command": "modulemanager.createModule",
           "when": "resourceScheme == 'file'",
           "group": "navigation"
         }
