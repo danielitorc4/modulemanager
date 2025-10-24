@@ -1,11 +1,11 @@
 import * as vscode from 'vscode';
-/**
- * Creates a new directory (folder) on a given path, and adds it to the list of directories.
- * 
- * @returns A Promise that resolves to void when the directory is created and added to the list.
- */
-export async function createDirectory(): Promise<void> {
-    const getSelectedDirectory = (): string | null => vscode.window.activeTextEditor?.document.uri.fsPath ?? null;
+
+export async function createDirectory(): Promise<vscode.Uri | null> {
+    const getSelectedDirectory = (): string | null => {
+    // Intenta obtener el directorio desde el explorador de archivos
+    // Si no hay, usa el workspace root
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+};
 
     const promptUserToSelectDirectory = async (): Promise<vscode.Uri | null> => {
         const selectedDirectory = getSelectedDirectory();
@@ -23,7 +23,7 @@ export async function createDirectory(): Promise<void> {
     const uri = await promptUserToSelectDirectory();
 
     if (!uri) {
-        return;
+        return null;
     }
 
     const folderName = await vscode.window.showInputBox({
@@ -33,10 +33,19 @@ export async function createDirectory(): Promise<void> {
     });
 
     if (!folderName) {
-        return;
+        return null;
     }
 
     const newDir = vscode.Uri.joinPath(uri, folderName);
-    await vscode.workspace.fs.createDirectory(newDir);
+
+    try {
+        await vscode.workspace.fs.createDirectory(newDir);
+        vscode.window.showInformationMessage(`Directory "${folderName}" created successfully!`);
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to create directory: ${error}`);
+    }
+
+
+    return newDir;
 }
 

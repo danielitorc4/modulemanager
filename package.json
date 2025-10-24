@@ -14,14 +14,19 @@
   "contributes": {
     "commands": [
       {
-        "command": "modulemanager.helloWorld",
-        "title": "Hello World"
-      },
-      {
         "command": "modulemanager.createDirectory",
         "title": "Create Directory"
       }
-    ]
+    ],
+    "menus": { 
+      "explorer/context": [
+        {
+          "command": "modulemanager.createDirectory",
+          "when": "resourceScheme == 'file'",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
