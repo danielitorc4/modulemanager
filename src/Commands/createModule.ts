@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { updateProjectConfig } from '../config/configManager';
 import { promptUserToSelectDirectory } from '../utils/utils';
 
 interface ModuleConfig {
@@ -23,7 +24,7 @@ export async function createModule(): Promise<vscode.Uri | null> {
         return null;
     }
 
-    // Step 1: Select workspace folder if there are multiple
+    // Select workspace folder if there are multiple
     let workspaceFolder: vscode.WorkspaceFolder;
     if (workspaceFolders.length > 1) {
         const selected = await vscode.window.showQuickPick(
@@ -45,13 +46,13 @@ export async function createModule(): Promise<vscode.Uri | null> {
         workspaceFolder = workspaceFolders[0];
     }
 
-    // Step 2: Select parent directory for the module
+    // Select parent directory for the module
     const parentUri = await promptUserToSelectDirectory();
     if (!parentUri) {
         return null;
     }
 
-    // Step 2: Get module name
+    // Get module name
     const moduleName = await vscode.window.showInputBox({
         prompt: 'Enter module name:',
         value: 'new-module',
@@ -70,7 +71,7 @@ export async function createModule(): Promise<vscode.Uri | null> {
         return null;
     }
 
-    // Step 3: Select module type (extensible for future build systems)
+    // Select module type (extensible for future build systems)
     const moduleType = await vscode.window.showQuickPick(
         [
             { label: 'Basic Module', value: 'basic', description: 'Simple module structure' },
@@ -94,10 +95,10 @@ export async function createModule(): Promise<vscode.Uri | null> {
     const moduleUri = vscode.Uri.joinPath(parentUri, moduleName);
 
     try {
-        // Step 4: Create module directory structure
+        // Create module directory structure
         const structure = await createModuleStructure(moduleUri, moduleType.value as ModuleConfig['type']);
 
-        // Step 5: Register the module in the project configuration
+        // Register the module in the project configuration
         await registerModule(workspaceFolder.uri, {
             name: moduleName,
             type: moduleType.value as ModuleConfig['type'],
@@ -105,7 +106,7 @@ export async function createModule(): Promise<vscode.Uri | null> {
             structure
         });
 
-        // Step 6: Create a .module marker file to distinguish from regular directories
+        // Create a .module marker file to distinguish from regular directories
         const moduleMarkerUri = vscode.Uri.joinPath(moduleUri, '.module');
         await vscode.workspace.fs.writeFile(
             moduleMarkerUri,
@@ -115,6 +116,10 @@ export async function createModule(): Promise<vscode.Uri | null> {
                 createdAt: new Date().toISOString()
             }, null, 2))
         );
+
+        // Update project configuration (tsconfig/jsconfig, .gitignore, VSCode settings)
+        const relativePath = path.relative(workspaceFolder.uri.fsPath, moduleUri.fsPath);
+        await updateProjectConfig(workspaceFolder.uri, relativePath);
 
         vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
         return moduleUri;
