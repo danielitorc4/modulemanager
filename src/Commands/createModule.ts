@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { promptUserToSelectDirectory } from '../utils/utils';
 
 interface ModuleConfig {
     name: string;
@@ -15,15 +16,37 @@ interface ProjectModules {
 const MODULE_CONFIG_FILE = '.vscode/modules.json';
 
 export async function createModule(): Promise<vscode.Uri | null> {
-    // Get workspace root
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
+    // Get workspace folders
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
         vscode.window.showErrorMessage('No workspace folder open.');
         return null;
     }
 
-    // Step 1: Select parent directory for the module
-    const parentUri = await promptUserToSelectDirectory(workspaceFolder);
+    // Step 1: Select workspace folder if there are multiple
+    let workspaceFolder: vscode.WorkspaceFolder;
+    if (workspaceFolders.length > 1) {
+        const selected = await vscode.window.showQuickPick(
+            workspaceFolders.map(folder => ({
+                label: folder.name,
+                description: folder.uri.fsPath,
+                folder: folder
+            })),
+            {
+                placeHolder: 'Select workspace folder for the new module'
+            }
+        );
+        
+        if (!selected) {
+            return null;
+        }
+        workspaceFolder = selected.folder;
+    } else {
+        workspaceFolder = workspaceFolders[0];
+    }
+
+    // Step 2: Select parent directory for the module
+    const parentUri = await promptUserToSelectDirectory();
     if (!parentUri) {
         return null;
     }
@@ -100,18 +123,6 @@ export async function createModule(): Promise<vscode.Uri | null> {
         vscode.window.showErrorMessage(`Failed to create module: ${error}`);
         return null;
     }
-}
-
-async function promptUserToSelectDirectory(workspaceFolder: vscode.WorkspaceFolder): Promise<vscode.Uri | null> {
-    const uri = await vscode.window.showOpenDialog({
-        openLabel: 'Select Parent Directory for Module',
-        defaultUri: workspaceFolder.uri,
-        canSelectFolders: true,
-        canSelectFiles: false,
-        canSelectMany: false
-    });
-
-    return uri?.[0] ?? null;
 }
 
 async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['type']): Promise<string[]> {
