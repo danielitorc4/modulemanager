@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { updateProjectConfig } from '../config/configManager';
 import { promptUserToSelectDirectory } from '../utils/utils';
+import { updateProjectConfig } from '../config/configManager';
 
 interface ModuleConfig {
     name: string;
@@ -46,13 +46,12 @@ export async function createModule(): Promise<vscode.Uri | null> {
         workspaceFolder = workspaceFolders[0];
     }
 
-    // Select parent directory for the module
+    // Get module name
     const parentUri = await promptUserToSelectDirectory();
     if (!parentUri) {
         return null;
     }
 
-    // Get module name
     const moduleName = await vscode.window.showInputBox({
         prompt: 'Enter module name:',
         value: 'new-module',
@@ -117,9 +116,8 @@ export async function createModule(): Promise<vscode.Uri | null> {
             }, null, 2))
         );
 
-        // Update project configuration (tsconfig/jsconfig, .gitignore, VSCode settings)
-        const relativePath = path.relative(workspaceFolder.uri.fsPath, moduleUri.fsPath);
-        await updateProjectConfig(workspaceFolder.uri, relativePath);
+        // Update project configuration (creates module config + updates root config)
+        await updateProjectConfig(workspaceFolder.uri, moduleUri, moduleName);
 
         vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
         return moduleUri;
