@@ -2,153 +2,197 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 
 /**
- * Updates TypeScript or JavaScript configuration to include the new module
+ * Updates project configuration to include the new module with independence
+ * Uses TypeScript/JavaScript composite projects for module isolation
  */
-export async function updateProjectConfig(workspaceUri: vscode.Uri, modulePath: string): Promise<void> {
-    // Try to update tsconfig.json first, then jsconfig.json
-    const tsconfigUpdated = await updateTsConfig(workspaceUri, modulePath);
+export async function updateProjectConfig(workspaceUri: vscode.Uri, moduleUri: vscode.Uri, moduleName: string): Promise<void> {
+    const relativePath = path.relative(workspaceUri.fsPath, moduleUri.fsPath);
     
-    if (!tsconfigUpdated) {
-        await updateJsConfig(workspaceUri, modulePath);
+    // Create module-specific config (for independence)
+    await createModuleConfig(moduleUri, moduleName);
+
+    // Update root config (for global view and path mappings)
+    const isTypeScript = await hasTypeScriptConfig(workspaceUri);
+    if (isTypeScript) {
+        await updateRootTsConfig(workspaceUri, relativePath, moduleName);
+    } else {
+        await updateRootJsConfig(workspaceUri, relativePath, moduleName);
     }
 
-    // Update VSCode settings to hide .module files
+    // Update VSCode settings and gitignore
     await updateVSCodeSettings(workspaceUri);
-
-    // Update or create .gitignore
     await updateGitignore(workspaceUri);
 }
 
 /**
- * Updates tsconfig.json to include the module in the compilation
+ * Creates a module-specific jsconfig.json or tsconfig.json with composite: true
+ * This ensures module independence
  */
-async function updateTsConfig(workspaceUri: vscode.Uri, modulePath: string): Promise<boolean> {
+async function createModuleConfig(moduleUri: vscode.Uri, moduleName: string): Promise<void> {
+    const tsconfigUri = vscode.Uri.joinPath(moduleUri, 'tsconfig.json');
+    const jsconfigUri = vscode.Uri.joinPath(moduleUri, 'jsconfig.json');
+    
+    // Check if TypeScript is used in the workspace
+    let useTypeScript = false;
+    try {
+        const parentTsConfig = vscode.Uri.joinPath(vscode.Uri.file(path.dirname(path.dirname(moduleUri.fsPath))), 'tsconfig.json');
+        await vscode.workspace.fs.stat(parentTsConfig);
+        useTypeScript = true;
+    } catch {
+        // No TypeScript, use JavaScript
+    }
+
+    const config = {
+        compilerOptions: {
+            composite: true,
+            baseUrl: ".",
+            rootDir: "./src",
+            outDir: "./dist",
+            declaration: true,
+            declarationMap: true,
+            sourceMap: true,
+            module: "ESNext",
+            target: "ES2020",
+            moduleResolution: "node"
+        },
+        include: ["src/**/*"],
+        exclude: ["node_modules", "dist"],
+        references: [] // Empty by default - dependencies added manually
+    };
+
+    const configUri = useTypeScript ? tsconfigUri : jsconfigUri;
+    const configContent = JSON.stringify(config, null, 2);
+    
+    try {
+        await vscode.workspace.fs.writeFile(configUri, Buffer.from(configContent));
+        console.log(`Created ${useTypeScript ? 'tsconfig' : 'jsconfig'}.json for module ${moduleName}`);
+    } catch (error) {
+        vscode.window.showWarningMessage(`Could not create module config: ${error}`);
+    }
+}
+
+/**
+ * Checks if the workspace uses TypeScript
+ */
+async function hasTypeScriptConfig(workspaceUri: vscode.Uri): Promise<boolean> {
+    const tsconfigUri = vscode.Uri.joinPath(workspaceUri, 'tsconfig.json');
+    try {
+        await vscode.workspace.fs.stat(tsconfigUri);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Updates root tsconfig.json to include module references and path mappings
+ */
+async function updateRootTsConfig(workspaceUri: vscode.Uri, modulePath: string, moduleName: string): Promise<void> {
     const tsconfigUri = vscode.Uri.joinPath(workspaceUri, 'tsconfig.json');
     
-    try {
-        // Check if tsconfig.json exists
-        const configData = await vscode.workspace.fs.readFile(tsconfigUri);
-        const configText = Buffer.from(configData).toString();
-        
-        // Parse JSON (handling comments using a simple approach)
-        let config: any;
-        try {
-            // Remove comments for parsing
-            const cleanJson = configText.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
-            config = JSON.parse(cleanJson);
-        } catch {
-            vscode.window.showWarningMessage('Could not parse tsconfig.json. Please add module paths manually.');
-            return false;
-        }
-
-        // Ensure include array exists
-        if (!config.include) {
-            config.include = [];
-        }
-
-        // Add module paths to include
-        const modulePattern = `${modulePath}/**/*`;
-        if (!config.include.includes(modulePattern)) {
-            config.include.push(modulePattern);
-        }
-
-        // Ensure compilerOptions and paths exist for better IntelliSense
-        if (!config.compilerOptions) {
-            config.compilerOptions = {};
-        }
-        if (!config.compilerOptions.paths) {
-            config.compilerOptions.paths = {};
-        }
-
-        // Add path mapping for cleaner imports (e.g., @moduleName/*)
-        const moduleName = path.basename(modulePath);
-        const pathKey = `@${moduleName}/*`;
-        const pathValue = [`${modulePath}/src/*`];
-        
-        if (!config.compilerOptions.paths[pathKey]) {
-            config.compilerOptions.paths[pathKey] = pathValue;
-        }
-
-        // Write back (pretty printed)
-        const updatedConfig = JSON.stringify(config, null, 2);
-        await vscode.workspace.fs.writeFile(tsconfigUri, Buffer.from(updatedConfig));
-        
-        vscode.window.showInformationMessage('Updated tsconfig.json to include new module.');
-        return true;
-
-    } catch (error) {
-        // tsconfig.json doesn't exist or couldn't be read
-        return false;
-    }
-}
-
-/**
- * Updates jsconfig.json (similar to tsconfig.json)
- */
-async function updateJsConfig(workspaceUri: vscode.Uri, modulePath: string): Promise<boolean> {
-    const jsconfigUri = vscode.Uri.joinPath(workspaceUri, 'jsconfig.json');
+    let config: any;
     
     try {
-        // Try to read existing jsconfig.json
-        let config: any;
-        try {
-            const configData = await vscode.workspace.fs.readFile(jsconfigUri);
-            const configText = Buffer.from(configData).toString();
-            const cleanJson = configText.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
-            config = JSON.parse(cleanJson);
-        } catch {
-            // Create new jsconfig.json if it doesn't exist
-            config = {
-                compilerOptions: {
-                    baseUrl: ".",
-                    paths: {}
-                },
-                include: []
-            };
-        }
-
-        // Ensure include array exists
-        if (!config.include) {
-            config.include = [];
-        }
-
-        // Add module paths
-        const modulePattern = `${modulePath}/**/*`;
-        if (!config.include.includes(modulePattern)) {
-            config.include.push(modulePattern);
-        }
-
-        // Add path mapping
-        if (!config.compilerOptions) {
-            config.compilerOptions = { baseUrl: ".", paths: {} };
-        }
-        if (!config.compilerOptions.paths) {
-            config.compilerOptions.paths = {};
-        }
-
-        const moduleName = path.basename(modulePath);
-        const pathKey = `@${moduleName}/*`;
-        const pathValue = [`${modulePath}/src/*`];
-        
-        if (!config.compilerOptions.paths[pathKey]) {
-            config.compilerOptions.paths[pathKey] = pathValue;
-        }
-
-        // Write config
-        const updatedConfig = JSON.stringify(config, null, 2);
-        await vscode.workspace.fs.writeFile(jsconfigUri, Buffer.from(updatedConfig));
-        
-        vscode.window.showInformationMessage('Updated jsconfig.json to include new module.');
-        return true;
-
-    } catch (error) {
-        vscode.window.showWarningMessage('Could not update jsconfig.json. Module created but IntelliSense may not work properly.');
-        return false;
+        // Read existing config
+        const configData = await vscode.workspace.fs.readFile(tsconfigUri);
+        const configText = Buffer.from(configData).toString();
+        const cleanJson = configText.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
+        config = JSON.parse(cleanJson);
+    } catch {
+        // Create new root config
+        config = {
+            compilerOptions: {
+                baseUrl: ".",
+                paths: {}
+            },
+            references: []
+        };
     }
+
+    // Ensure necessary structures exist
+    if (!config.compilerOptions) {
+        config.compilerOptions = {};
+    }
+    if (!config.compilerOptions.paths) {
+        config.compilerOptions.paths = {};
+    }
+    if (!config.references) {
+        config.references = [];
+    }
+
+    // Add path mapping for clean imports
+    const pathKey = `@${moduleName}/*`;
+    const pathValue = [`${modulePath}/src/*`];
+    config.compilerOptions.paths[pathKey] = pathValue;
+
+    // Add module reference (for composite projects)
+    const referenceExists = config.references.some((ref: any) => ref.path === `./${modulePath}`);
+    if (!referenceExists) {
+        config.references.push({ path: `./${modulePath}` });
+    }
+
+    // Write updated config
+    const updatedConfig = JSON.stringify(config, null, 2);
+    await vscode.workspace.fs.writeFile(tsconfigUri, Buffer.from(updatedConfig));
+    
+    vscode.window.showInformationMessage('Updated tsconfig.json with new module.');
 }
 
 /**
- * Updates VSCode settings to hide .module files
+ * Updates root jsconfig.json (same logic as TypeScript)
+ */
+async function updateRootJsConfig(workspaceUri: vscode.Uri, modulePath: string, moduleName: string): Promise<void> {
+    const jsconfigUri = vscode.Uri.joinPath(workspaceUri, 'jsconfig.json');
+    
+    let config: any;
+    
+    try {
+        const configData = await vscode.workspace.fs.readFile(jsconfigUri);
+        const configText = Buffer.from(configData).toString();
+        const cleanJson = configText.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
+        config = JSON.parse(cleanJson);
+    } catch {
+        // Create new root config
+        config = {
+            compilerOptions: {
+                baseUrl: ".",
+                paths: {}
+            },
+            references: []
+        };
+    }
+
+    // Ensure structures
+    if (!config.compilerOptions) {
+        config.compilerOptions = { baseUrl: ".", paths: {} };
+    }
+    if (!config.compilerOptions.paths) {
+        config.compilerOptions.paths = {};
+    }
+    if (!config.references) {
+        config.references = [];
+    }
+
+    // Add path mapping
+    const pathKey = `@${moduleName}/*`;
+    const pathValue = [`${modulePath}/src/*`];
+    config.compilerOptions.paths[pathKey] = pathValue;
+
+    // Add reference
+    const referenceExists = config.references.some((ref: any) => ref.path === `./${modulePath}`);
+    if (!referenceExists) {
+        config.references.push({ path: `./${modulePath}` });
+    }
+
+    // Write config
+    const updatedConfig = JSON.stringify(config, null, 2);
+    await vscode.workspace.fs.writeFile(jsconfigUri, Buffer.from(updatedConfig));
+    
+    vscode.window.showInformationMessage('Updated jsconfig.json with new module.');
+}
+
+/**
+ * Updates VSCode settings to hide internal module files
  */
 async function updateVSCodeSettings(workspaceUri: vscode.Uri): Promise<void> {
     const vscodeDir = vscode.Uri.joinPath(workspaceUri, '.vscode');
@@ -159,47 +203,46 @@ async function updateVSCodeSettings(workspaceUri: vscode.Uri): Promise<void> {
         try {
             await vscode.workspace.fs.createDirectory(vscodeDir);
         } catch {
-            // Directory already exists
+            // Already exists
         }
 
         let settings: any = {};
         
         try {
-            // Try to read existing settings
             const settingsData = await vscode.workspace.fs.readFile(settingsUri);
             const settingsText = Buffer.from(settingsData).toString();
             const cleanJson = settingsText.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
             settings = JSON.parse(cleanJson);
         } catch {
-            // Settings file doesn't exist, will create new one
+            // New settings file
         }
 
-        // Add .module to files.exclude
+        // Hide .module files from explorer
         if (!settings['files.exclude']) {
             settings['files.exclude'] = {};
         }
-        
         settings['files.exclude']['**/.module'] = true;
 
-        // Write settings
         const updatedSettings = JSON.stringify(settings, null, 2);
         await vscode.workspace.fs.writeFile(settingsUri, Buffer.from(updatedSettings));
 
     } catch (error) {
-        // Non-critical, just log
         console.error('Could not update VSCode settings:', error);
     }
 }
 
 /**
- * Updates .gitignore to include module-related files
+ * Updates .gitignore to exclude module internal files
  */
 async function updateGitignore(workspaceUri: vscode.Uri): Promise<void> {
     const gitignoreUri = vscode.Uri.joinPath(workspaceUri, '.gitignore');
     
     const gitignoreEntries = [
-        '# ModuleManager',
-        '**/.module'
+        '',
+        '# ModuleManager - Internal module files',
+        '**/.module',
+        '**/dist/',
+        '**/*.tsbuildinfo'
     ];
 
     try {
@@ -212,28 +255,71 @@ async function updateGitignore(workspaceUri: vscode.Uri): Promise<void> {
             // .gitignore doesn't exist
         }
 
-        // Check if entries already exist
-        let needsUpdate = false;
-        let newContent = existingContent;
-
-        for (const entry of gitignoreEntries) {
-            if (!existingContent.includes(entry)) {
-                needsUpdate = true;
-            }
-        }
-
-        if (needsUpdate) {
-            // Add entries
+        // Check if ModuleManager section exists
+        if (!existingContent.includes('# ModuleManager')) {
+            let newContent = existingContent;
             if (existingContent && !existingContent.endsWith('\n')) {
                 newContent += '\n';
             }
-            newContent += '\n' + gitignoreEntries.join('\n') + '\n';
+            newContent += gitignoreEntries.join('\n') + '\n';
 
             await vscode.workspace.fs.writeFile(gitignoreUri, Buffer.from(newContent));
         }
 
     } catch (error) {
-        // Non-critical
         console.error('Could not update .gitignore:', error);
     }
+}
+
+/**
+ * Adds a dependency from one module to another
+ * Updates the dependent module's config to reference the dependency
+ */
+export async function addModuleDependency(
+    moduleUri: vscode.Uri,
+    dependencyModulePath: string
+): Promise<void> {
+    const configFiles = ['tsconfig.json', 'jsconfig.json'];
+    
+    for (const configFile of configFiles) {
+        const configUri = vscode.Uri.joinPath(moduleUri, configFile);
+        
+        try {
+            const configData = await vscode.workspace.fs.readFile(configUri);
+            const configText = Buffer.from(configData).toString();
+            const cleanJson = configText.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
+            const config = JSON.parse(cleanJson);
+
+            if (!config.references) {
+                config.references = [];
+            }
+
+            // Calculate relative path from module to dependency
+            const relativePath = path.relative(
+                path.dirname(configUri.fsPath),
+                dependencyModulePath
+            ).replace(/\\/g, '/');
+
+            // Check if reference already exists
+            const refExists = config.references.some((ref: any) => 
+                ref.path === relativePath || ref.path === `./${relativePath}`
+            );
+
+            if (!refExists) {
+                config.references.push({ path: relativePath });
+                
+                const updatedConfig = JSON.stringify(config, null, 2);
+                await vscode.workspace.fs.writeFile(configUri, Buffer.from(updatedConfig));
+                
+                vscode.window.showInformationMessage(`Added module dependency in ${configFile}`);
+            }
+
+            return; // Found and updated
+        } catch {
+            // Try next config file
+            continue;
+        }
+    }
+
+    vscode.window.showWarningMessage('Could not find module config file to update.');
 }
