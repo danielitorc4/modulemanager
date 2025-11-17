@@ -5,13 +5,10 @@ import * as vscode from 'vscode';
  * or falls back to the workspace root if nothing is selected.
  */
 export function getSelectedDirectory(): string | null {
-    // Use the active text editor to get the currently selected directory
     const activeEditor = vscode.window.activeTextEditor;
     if (activeEditor) {
         return activeEditor.document.uri.fsPath;
     }
-
-    // If not available, use workspace root
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
 }
 
@@ -32,3 +29,34 @@ export async function promptUserToSelectDirectory(): Promise<vscode.Uri | null> 
     const uris = await vscode.window.showOpenDialog(options);
     return uris?.[0] ?? null;
 }
+
+/**
+ * Gets the workspace folder, prompting user if multiple folders exist.
+ * Returns null if no workspace is open or user cancels selection.
+ */
+export async function getWorkspaceFolder(): Promise<vscode.WorkspaceFolder | null> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        vscode.window.showErrorMessage('No workspace folder open.');
+        return null;
+    }
+
+    if (workspaceFolders.length === 1) {
+        return workspaceFolders[0];
+    }
+
+    const selected = await vscode.window.showQuickPick(
+        workspaceFolders.map(folder => ({
+            label: folder.name,
+            description: folder.uri.fsPath,
+            folder: folder
+        })),
+        { placeHolder: 'Select workspace folder' }
+    );
+    
+    return selected?.folder || null;
+}
+
+
+

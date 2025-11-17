@@ -1,57 +1,23 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { promptUserToSelectDirectory } from '../utils/utils';
-import { updateProjectConfig } from '../config/configManager';
-
-interface ModuleConfig {
-    name: string;
-    type: 'basic' | 'maven' | 'gradle'; // Extensible for future build systems
-    createdAt: string;
-    structure: string[];
-}
-
-interface ProjectModules {
-    modules: ModuleConfig[];
-}
-
-const MODULE_CONFIG_FILE = '.vscode/modules.json';
+import { promptUserToSelectDirectory, getWorkspaceFolder } from '../utils/utils';
+import { ModuleConfig, ProjectModules } from '../types';
+import { CONFIG_PATHS, REGEX } from '../constants';
 
 export async function createModule(): Promise<vscode.Uri | null> {
-    // Get workspace folders
-    const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders || workspaceFolders.length === 0) {
-        vscode.window.showErrorMessage('No workspace folder open.');
+    // Get workspace folder
+    const workspaceFolder = await getWorkspaceFolder();
+    if (!workspaceFolder) {
         return null;
     }
 
-    // Select workspace folder if there are multiple
-    let workspaceFolder: vscode.WorkspaceFolder;
-    if (workspaceFolders.length > 1) {
-        const selected = await vscode.window.showQuickPick(
-            workspaceFolders.map(folder => ({
-                label: folder.name,
-                description: folder.uri.fsPath,
-                folder: folder
-            })),
-            {
-                placeHolder: 'Select workspace folder for the new module'
-            }
-        );
-        
-        if (!selected) {
-            return null;
-        }
-        workspaceFolder = selected.folder;
-    } else {
-        workspaceFolder = workspaceFolders[0];
-    }
-
-    // Get module name
+    // Get module parent directory
     const parentUri = await promptUserToSelectDirectory();
     if (!parentUri) {
         return null;
     }
 
+    // Get module name
     const moduleName = await vscode.window.showInputBox({
         prompt: 'Enter module name:',
         value: 'new-module',
@@ -59,7 +25,7 @@ export async function createModule(): Promise<vscode.Uri | null> {
             if (!input || input.trim() === '') {
                 return 'Module name cannot be empty.';
             }
-            if (!/^[a-zA-Z0-9-_]+$/.test(input)) {
+            if (!REGEX.MODULE_NAME.test(input)) {
                 return 'Module name can only contain letters, numbers, hyphens, and underscores.';
             }
             return null;
@@ -70,16 +36,14 @@ export async function createModule(): Promise<vscode.Uri | null> {
         return null;
     }
 
-    // Select module type (extensible for future build systems)
+    // Select module type
     const moduleType = await vscode.window.showQuickPick(
         [
             { label: 'Basic Module', value: 'basic', description: 'Simple module structure' },
             { label: 'Maven Module', value: 'maven', description: 'Maven-based module (coming soon)', detail: 'Not yet implemented' },
             { label: 'Gradle Module', value: 'gradle', description: 'Gradle-based module (coming soon)', detail: 'Not yet implemented' }
         ],
-        {
-            placeHolder: 'Select module type'
-        }
+        { placeHolder: 'Select module type' }
     );
 
     if (!moduleType) {
@@ -105,8 +69,8 @@ export async function createModule(): Promise<vscode.Uri | null> {
             structure
         });
 
-        // Create a .module marker file to distinguish from regular directories
-        const moduleMarkerUri = vscode.Uri.joinPath(moduleUri, '.module');
+        // Create a .module marker file
+        const moduleMarkerUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.MODULE_MARKER);
         await vscode.workspace.fs.writeFile(
             moduleMarkerUri,
             Buffer.from(JSON.stringify({
@@ -116,8 +80,8 @@ export async function createModule(): Promise<vscode.Uri | null> {
             }, null, 2))
         );
 
-        // Update project configuration (creates module config + updates root config)
-        await updateProjectConfig(workspaceFolder.uri, moduleUri, moduleName);
+        // (Optional) Update project configuration, e.g., tsconfig
+        // await updateProjectConfig(workspaceFolder.uri, moduleUri, moduleName);
 
         vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
         return moduleUri;
@@ -133,14 +97,12 @@ async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['
 
     switch (type) {
         case 'basic':
-            // Create IntelliJ-like structure
             const dirs = ['src', 'test', 'resources', 'lib'];
             for (const dir of dirs) {
                 const dirUri = vscode.Uri.joinPath(moduleUri, dir);
                 await vscode.workspace.fs.createDirectory(dirUri);
                 structure.push(dir);
             }
-
             // Create a README.md in the module
             const readmeUri = vscode.Uri.joinPath(moduleUri, 'README.md');
             await vscode.workspace.fs.writeFile(
@@ -149,15 +111,9 @@ async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['
             );
             structure.push('README.md');
             break;
-
         case 'maven':
-            // Future implementation for Maven structure
-            // src/main/java, src/main/resources, src/test/java, pom.xml, etc.
-            break;
-
         case 'gradle':
-            // Future implementation for Gradle structure
-            // src/main/java, src/main/resources, build.gradle, etc.
+            // Future implementation
             break;
     }
 
@@ -165,12 +121,10 @@ async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['
 }
 
 async function registerModule(workspaceUri: vscode.Uri, moduleConfig: ModuleConfig): Promise<void> {
-    const configUri = vscode.Uri.joinPath(workspaceUri, MODULE_CONFIG_FILE);
-    
-    let projectModules: ProjectModules = { modules: [] };
+    const configUri = vscode.Uri.joinPath(workspaceUri, CONFIG_PATHS.MODULES_JSON);
+    let projectModules: ProjectModules = { modules: {} };
 
     try {
-        // Try to read existing config
         const configData = await vscode.workspace.fs.readFile(configUri);
         projectModules = JSON.parse(Buffer.from(configData).toString());
     } catch (error) {
@@ -183,10 +137,8 @@ async function registerModule(workspaceUri: vscode.Uri, moduleConfig: ModuleConf
         }
     }
 
-    // Add new module to the list
-    projectModules.modules.push(moduleConfig);
+    projectModules.modules[moduleConfig.name] = moduleConfig;
 
-    // Write updated config
     await vscode.workspace.fs.writeFile(
         configUri,
         Buffer.from(JSON.stringify(projectModules, null, 2))
@@ -196,7 +148,7 @@ async function registerModule(workspaceUri: vscode.Uri, moduleConfig: ModuleConf
 // Utility function to check if a directory is a module
 export async function isModule(uri: vscode.Uri): Promise<boolean> {
     try {
-        const moduleMarkerUri = vscode.Uri.joinPath(uri, '.module');
+        const moduleMarkerUri = vscode.Uri.joinPath(uri, CONFIG_PATHS.MODULE_MARKER);
         await vscode.workspace.fs.stat(moduleMarkerUri);
         return true;
     } catch {
@@ -207,10 +159,10 @@ export async function isModule(uri: vscode.Uri): Promise<boolean> {
 // Utility function to get all registered modules
 export async function getRegisteredModules(workspaceUri: vscode.Uri): Promise<ModuleConfig[]> {
     try {
-        const configUri = vscode.Uri.joinPath(workspaceUri, MODULE_CONFIG_FILE);
+        const configUri = vscode.Uri.joinPath(workspaceUri, CONFIG_PATHS.MODULES_JSON);
         const configData = await vscode.workspace.fs.readFile(configUri);
         const projectModules: ProjectModules = JSON.parse(Buffer.from(configData).toString());
-        return projectModules.modules;
+        return Object.values(projectModules.modules);
     } catch {
         return [];
     }
