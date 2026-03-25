@@ -419,7 +419,7 @@ Contributions are welcome! Please follow these guidelines:
 
 ## License
 
-[MIT License](LICENSE)
+[MIT License](.github/MIT%20License.txt)
 
 ## Author
 
