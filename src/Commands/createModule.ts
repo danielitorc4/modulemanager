@@ -3,17 +3,25 @@ import * as path from 'path';
 import { promptUserToSelectDirectory, getWorkspaceFolder } from '../utils/utils';
 import { ModuleConfig, ProjectModules } from '../types';
 import { CONFIG_PATHS, REGEX } from '../constants';
+import { removeModuleFromProjectConfig, updateProjectConfig } from '../config/configManager';
 
-export async function createModule(): Promise<vscode.Uri | null> {
+export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
     // Get workspace folder
-    const workspaceFolder = await getWorkspaceFolder();
+    const workspaceFolder = resourceUri
+        ? vscode.workspace.getWorkspaceFolder(resourceUri) ?? null
+        : await getWorkspaceFolder();
     if (!workspaceFolder) {
         return null;
     }
 
     // Get module parent directory
-    const parentUri = await promptUserToSelectDirectory();
+    const parentUri = await resolveParentDirectory(resourceUri);
     if (!parentUri) {
+        return null;
+    }
+
+    if (!isInsideWorkspace(workspaceFolder.uri, parentUri)) {
+        vscode.window.showErrorMessage('Selected module directory must be inside the workspace folder.');
         return null;
     }
 
@@ -66,7 +74,8 @@ export async function createModule(): Promise<vscode.Uri | null> {
             name: moduleName,
             type: moduleType.value as ModuleConfig['type'],
             createdAt: new Date().toISOString(),
-            structure
+            structure,
+            path: path.relative(workspaceFolder.uri.fsPath, moduleUri.fsPath).replace(/\\/g, '/')
         });
 
         // Create a .module marker file
@@ -80,8 +89,12 @@ export async function createModule(): Promise<vscode.Uri | null> {
             }, null, 2))
         );
 
-        // (Optional) Update project configuration, e.g., tsconfig
-        // await updateProjectConfig(workspaceFolder.uri, moduleUri, moduleName);
+        try {
+            await updateProjectConfig(workspaceFolder.uri, moduleUri, moduleName);
+        } catch (configError) {
+            await rollbackModuleCreation(workspaceFolder.uri, moduleUri, moduleName);
+            throw new Error(`Project configuration update failed: ${configError}`);
+        }
 
         vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
         return moduleUri;
@@ -145,6 +158,40 @@ async function registerModule(workspaceUri: vscode.Uri, moduleConfig: ModuleConf
     );
 }
 
+async function rollbackModuleCreation(
+    workspaceUri: vscode.Uri,
+    moduleUri: vscode.Uri,
+    moduleName: string
+): Promise<void> {
+    // Best-effort rollback to avoid leaving partially configured modules.
+    await unregisterModule(workspaceUri, moduleName);
+
+    try {
+        await vscode.workspace.fs.delete(moduleUri, { recursive: true, useTrash: false });
+    } catch {
+        // If cleanup fails, the command still reports the original failure.
+    }
+}
+
+async function unregisterModule(workspaceUri: vscode.Uri, moduleName: string): Promise<void> {
+    const configUri = vscode.Uri.joinPath(workspaceUri, CONFIG_PATHS.MODULES_JSON);
+
+    try {
+        const configData = await vscode.workspace.fs.readFile(configUri);
+        const projectModules: ProjectModules = JSON.parse(Buffer.from(configData).toString());
+
+        if (projectModules.modules[moduleName]) {
+            delete projectModules.modules[moduleName];
+            await vscode.workspace.fs.writeFile(
+                configUri,
+                Buffer.from(JSON.stringify(projectModules, null, 2))
+            );
+        }
+    } catch {
+        // If registry cleanup fails, keep original error path.
+    }
+}
+
 // Utility function to check if a directory is a module
 export async function isModule(uri: vscode.Uri): Promise<boolean> {
     try {
@@ -166,4 +213,114 @@ export async function getRegisteredModules(workspaceUri: vscode.Uri): Promise<Mo
     } catch {
         return [];
     }
+}
+
+async function resolveParentDirectory(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
+    if (!resourceUri) {
+        return promptUserToSelectDirectory();
+    }
+
+    try {
+        const stat = await vscode.workspace.fs.stat(resourceUri);
+        if (stat.type & vscode.FileType.Directory) {
+            return resourceUri;
+        }
+    } catch {
+        // Fallback to parent directory below.
+    }
+
+    return vscode.Uri.file(path.dirname(resourceUri.fsPath));
+}
+
+function isInsideWorkspace(workspaceUri: vscode.Uri, selectedUri: vscode.Uri): boolean {
+    const workspacePath = path.resolve(workspaceUri.fsPath);
+    const selectedPath = path.resolve(selectedUri.fsPath);
+    const relativePath = path.relative(workspacePath, selectedPath);
+
+    return relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath);
+}
+
+export async function pruneDeletedModules(workspaceUri: vscode.Uri): Promise<void> {
+    const configUri = vscode.Uri.joinPath(workspaceUri, CONFIG_PATHS.MODULES_JSON);
+    let projectModules: ProjectModules;
+
+    try {
+        const configData = await vscode.workspace.fs.readFile(configUri);
+        const parsed = JSON.parse(Buffer.from(configData).toString());
+        projectModules = normalizeProjectModules(parsed);
+    } catch {
+        return;
+    }
+
+    const removedModules: Array<{ name: string; path?: string }> = [];
+    const keptModules: Record<string, ModuleConfig> = {};
+
+    for (const [moduleName, moduleConfig] of Object.entries(projectModules.modules)) {
+        const moduleUri = await resolveRegisteredModuleUri(workspaceUri, moduleName, moduleConfig.path);
+        if (!moduleUri || !(await isModule(moduleUri))) {
+            removedModules.push({ name: moduleName, path: moduleConfig.path });
+            continue;
+        }
+
+        keptModules[moduleName] = moduleConfig;
+    }
+
+    if (removedModules.length === 0) {
+        return;
+    }
+
+    await vscode.workspace.fs.writeFile(
+        configUri,
+        Buffer.from(JSON.stringify({ modules: keptModules }, null, 2))
+    );
+
+    for (const removedModule of removedModules) {
+        await removeModuleFromProjectConfig(workspaceUri, removedModule.name, removedModule.path);
+    }
+}
+
+function normalizeProjectModules(parsedConfig: any): ProjectModules {
+    const modules = parsedConfig?.modules;
+    if (modules && typeof modules === 'object' && !Array.isArray(modules)) {
+        return { modules };
+    }
+
+    if (Array.isArray(modules)) {
+        const normalized: Record<string, ModuleConfig> = {};
+        for (const moduleConfig of modules) {
+            if (moduleConfig && typeof moduleConfig.name === 'string') {
+                normalized[moduleConfig.name] = moduleConfig;
+            }
+        }
+        return { modules: normalized };
+    }
+
+    return { modules: {} };
+}
+
+async function resolveRegisteredModuleUri(
+    workspaceUri: vscode.Uri,
+    moduleName: string,
+    storedModulePath?: string
+): Promise<vscode.Uri | null> {
+    const candidates: string[] = [];
+
+    if (storedModulePath) {
+        candidates.push(path.join(workspaceUri.fsPath, storedModulePath));
+    }
+
+    candidates.push(
+        path.join(workspaceUri.fsPath, moduleName),
+        path.join(workspaceUri.fsPath, 'src', moduleName),
+        path.join(workspaceUri.fsPath, 'modules', moduleName)
+    );
+
+    for (const candidate of candidates) {
+        const candidateUri = vscode.Uri.file(candidate);
+        if (await isModule(candidateUri)) {
+            return candidateUri;
+        }
+    }
+
+    return null;
 }

@@ -2,14 +2,16 @@
   "name": "modulemanager",
   "displayName": "ModuleManager",
   "description": "module management extension for VSCode, allowing you to easily add, organize, and configure project modules.",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "engines": {
     "vscode": "^1.104.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
   "commands": [
@@ -28,6 +30,10 @@
         {
           "command": "modulemanager.showDependencies",
           "title": "Show Module Dependencies"
+        },
+        {
+          "command": "modulemanager.validateDependencies",
+          "title": "Validate Module Dependencies"
         }
       ],
     "menus": { 

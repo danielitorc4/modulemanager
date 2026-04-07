@@ -7,12 +7,12 @@ import * as path from 'path';
  */
 export async function updateProjectConfig(workspaceUri: vscode.Uri, moduleUri: vscode.Uri, moduleName: string): Promise<void> {
     const relativePath = path.relative(workspaceUri.fsPath, moduleUri.fsPath);
+    const isTypeScript = await hasTypeScriptConfig(workspaceUri);
     
     // Create module-specific config (for independence)
-    await createModuleConfig(moduleUri, moduleName);
+    await createModuleConfig(moduleUri, moduleName, isTypeScript);
 
     // Update root config (for global view and path mappings)
-    const isTypeScript = await hasTypeScriptConfig(workspaceUri);
     if (isTypeScript) {
         await updateRootTsConfig(workspaceUri, relativePath, moduleName);
     } else {
@@ -25,22 +25,30 @@ export async function updateProjectConfig(workspaceUri: vscode.Uri, moduleUri: v
 }
 
 /**
+ * Removes a module's path mapping and reference from root config files.
+ */
+export async function removeModuleFromProjectConfig(
+    workspaceUri: vscode.Uri,
+    moduleName: string,
+    modulePath?: string
+): Promise<void> {
+    const configUris = [
+        vscode.Uri.joinPath(workspaceUri, 'tsconfig.json'),
+        vscode.Uri.joinPath(workspaceUri, 'jsconfig.json')
+    ];
+
+    for (const configUri of configUris) {
+        await removeModuleFromRootConfig(configUri, moduleName, modulePath);
+    }
+}
+
+/**
  * Creates a module-specific jsconfig.json or tsconfig.json with composite: true
  * This ensures module independence
  */
-async function createModuleConfig(moduleUri: vscode.Uri, moduleName: string): Promise<void> {
+async function createModuleConfig(moduleUri: vscode.Uri, moduleName: string, useTypeScript: boolean): Promise<void> {
     const tsconfigUri = vscode.Uri.joinPath(moduleUri, 'tsconfig.json');
     const jsconfigUri = vscode.Uri.joinPath(moduleUri, 'jsconfig.json');
-    
-    // Check if TypeScript is used in the workspace
-    let useTypeScript = false;
-    try {
-        const parentTsConfig = vscode.Uri.joinPath(vscode.Uri.file(path.dirname(path.dirname(moduleUri.fsPath))), 'tsconfig.json');
-        await vscode.workspace.fs.stat(parentTsConfig);
-        useTypeScript = true;
-    } catch {
-        // No TypeScript, use JavaScript
-    }
 
     const config = {
         compilerOptions: {
@@ -189,6 +197,53 @@ async function updateRootJsConfig(workspaceUri: vscode.Uri, modulePath: string, 
     await vscode.workspace.fs.writeFile(jsconfigUri, Buffer.from(updatedConfig));
     
     vscode.window.showInformationMessage('Updated jsconfig.json with new module.');
+}
+
+async function removeModuleFromRootConfig(
+    configUri: vscode.Uri,
+    moduleName: string,
+    modulePath?: string
+): Promise<void> {
+    let config: any;
+
+    try {
+        const configData = await vscode.workspace.fs.readFile(configUri);
+        const configText = Buffer.from(configData).toString();
+        const cleanJson = configText.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
+        config = JSON.parse(cleanJson);
+    } catch {
+        return;
+    }
+
+    if (config.compilerOptions?.paths) {
+        delete config.compilerOptions.paths[`@${moduleName}/*`];
+    }
+
+    if (Array.isArray(config.references)) {
+        const candidatePaths = new Set<string>();
+        if (modulePath) {
+            candidatePaths.add(normalizeRefPath(modulePath));
+        }
+        candidatePaths.add(normalizeRefPath(moduleName));
+        candidatePaths.add(normalizeRefPath(`src/${moduleName}`));
+        candidatePaths.add(normalizeRefPath(`modules/${moduleName}`));
+
+        config.references = config.references.filter((ref: any) => {
+            if (!ref || typeof ref.path !== 'string') {
+                return true;
+            }
+
+            const refPath = normalizeRefPath(ref.path);
+            return !candidatePaths.has(refPath) && path.basename(refPath) !== moduleName;
+        });
+    }
+
+    await vscode.workspace.fs.writeFile(configUri, Buffer.from(JSON.stringify(config, null, 2)));
+}
+
+function normalizeRefPath(refPath: string): string {
+    const normalized = refPath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+    return normalized;
 }
 
 /**

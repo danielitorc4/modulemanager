@@ -33,13 +33,15 @@ ModuleManager brings IntelliJ IDEA's powerful module system to Visual Studio Cod
 
 ## Features
 
-- **Structured Module Creation**: Generate modules with predefined folder layouts (src, test, resources, lib)
+- **Structured Module Creation**: Generate modules with required core artifacts and optional template-driven folders
 - **Module Independence**: Modules are isolated by default, similar to IntelliJ IDEA's module system
 - **Explicit Dependencies**: Declare module dependencies explicitly when needed
 - **Automatic Configuration**: Updates TypeScript/JavaScript configuration files automatically
 - **Multi-root Workspace Support**: Seamlessly works with VSCode multi-root workspaces
 - **Path Aliases**: Clean imports using `@ModuleName/*` syntax
 - **IntelliSense Support**: Full autocompletion and type checking across modules
+- **Dependency Validation**: Detect missing module references from import usage and apply one-click fixes
+- **Deletion Reconciliation**: Automatically prunes deleted modules from registry and root config
 
 ## Installation
 
@@ -47,7 +49,7 @@ ModuleManager brings IntelliJ IDEA's powerful module system to Visual Studio Cod
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/modulemanager.git
+   git clone https://github.com/danielitorc4/modulemanager
    cd modulemanager
    ```
 
@@ -99,18 +101,16 @@ The extension will automatically configure your project for module independence.
 
 ### Module Structure
 
-Each created module follows this structure:
+Each created module includes the required core artifacts:
 
 ```
 ModuleName/
-├── jsconfig.json           # Module-specific configuration
+├── tsconfig.json|jsconfig.json  # Module-specific configuration
 ├── .module                 # Module marker (hidden by default)
 ├── src/                    # Source code
-├── test/                   # Test files
-├── resources/              # Resource files
-├── lib/                    # External libraries
-└── README.md               # Module documentation
 ```
+
+Optional folders and files (for example `test`, `resources`, `lib`, `README.md`) are template-driven and may vary per project.
 
 ### Managing Dependencies
 
@@ -145,10 +145,11 @@ import { Something } from '@ModuleA/something';
 
 #### Automated Dependency Management
 
-Automated dependency management commands are planned for version 0.3.0:
+Automated dependency management commands are available:
 - `Add Module Dependency`
 - `Remove Module Dependency`
-- `List Module Dependencies`
+- `Show Module Dependencies`
+- `Validate Module Dependencies`
 
 ## Configuration
 
@@ -214,20 +215,20 @@ The extension maintains a registry at `.vscode/modules.json`:
 
 ```json
 {
-  "modules": [
-    {
+  "modules": {
+    "ModuleA": {
       "name": "ModuleA",
       "type": "basic",
       "createdAt": "2025-10-28T10:30:00.000Z",
       "structure": ["src", "test", "resources", "lib", "README.md"]
     },
-    {
+    "ModuleB": {
       "name": "ModuleB",
       "type": "basic",
       "createdAt": "2025-10-28T11:45:00.000Z",
       "structure": ["src", "test", "resources", "lib", "README.md"]
     }
-  ]
+  }
 }
 ```
 
@@ -347,7 +348,7 @@ Set breakpoints in TypeScript files and use VSCode's debugging tools normally.
 
 ## Roadmap
 
-### Version 0.2.0 (Current)
+### Version 0.3.0 (Current)
 
 - [x] Basic module creation with folder structure
 - [x] Multi-root workspace support
@@ -355,24 +356,25 @@ Set breakpoints in TypeScript files and use VSCode's debugging tools normally.
 - [x] Module independence via composite projects
 - [x] Path alias support for clean imports
 - [x] VSCode settings and gitignore management
-
-### Version 0.3.0
-
-- [ ] Command: Add Module Dependency
-- [ ] Command: Remove Module Dependency  
-- [ ] Command: List Module Dependencies
-- [ ] Dependency graph visualization
-- [ ] Module renaming
-- [ ] Module deletion with cleanup
+- [x] Command: Add Module Dependency
+- [x] Command: Remove Module Dependency
+- [x] Command: Show Module Dependencies
+- [x] Command: Validate Module Dependencies
+- [x] Module deletion reconciliation (registry + root config cleanup)
 
 ### Version 0.4.0
+
+- [ ] Dependency graph visualization
+- [ ] Module renaming
+
+### Version 0.5.0
 
 - [ ] Maven module template
 - [ ] Gradle module template
 - [ ] Auto-generation of build files (pom.xml, build.gradle)
 - [ ] Java project structure support
 
-### Version 0.5.0
+### Version 0.6.0
 
 - [ ] Custom module templates
 - [ ] Template import/export

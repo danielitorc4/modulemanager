@@ -7,6 +7,18 @@ interface ModuleDependency {
     dependencies: string[];
 }
 
+type RegistryModule = {
+    name: string;
+};
+
+interface MissingDependency {
+    sourceModule: string;
+    sourceModulePath: string;
+    targetModule: string;
+    targetModulePath: string;
+    filePath: string;
+}
+
 /**
  * Adds a dependency from one module to another
  * Validates against circular dependencies before adding
@@ -219,6 +231,72 @@ export async function showModuleDependencies(): Promise<void> {
 }
 
 /**
+ * Validates imports across modules and offers a one-click fix to add missing dependencies.
+ */
+export async function validateModuleDependencies(): Promise<void> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+        vscode.window.showErrorMessage('No workspace folder open.');
+        return;
+    }
+
+    const modules = await getAllModules(workspaceFolder.uri);
+    if (modules.length < 2) {
+        vscode.window.showInformationMessage('Not enough modules found to validate dependencies.');
+        return;
+    }
+
+    const missingDependencies = await findMissingDependencies(workspaceFolder.uri, modules);
+    if (missingDependencies.length === 0) {
+        vscode.window.showInformationMessage('No missing module dependencies were detected.');
+        return;
+    }
+
+    const selected = await vscode.window.showQuickPick(
+        missingDependencies.map(item => ({
+            label: `${item.sourceModule} -> ${item.targetModule}`,
+            description: path.relative(workspaceFolder.uri.fsPath, item.filePath),
+            detail: 'Add missing dependency reference',
+            item
+        })),
+        {
+            placeHolder: 'Select a missing dependency to fix'
+        }
+    );
+
+    if (!selected) {
+        return;
+    }
+
+    const wouldCreateCycle = await checkCircularDependency(
+        modules,
+        selected.item.sourceModule,
+        selected.item.targetModule
+    );
+
+    if (wouldCreateCycle) {
+        vscode.window.showErrorMessage(
+            `Cannot add dependency ${selected.item.sourceModule} -> ${selected.item.targetModule}: this would create a circular dependency.`
+        );
+        return;
+    }
+
+    try {
+        await addDependencyToConfig(
+            workspaceFolder.uri,
+            selected.item.sourceModulePath,
+            selected.item.targetModulePath
+        );
+
+        vscode.window.showInformationMessage(
+            `Added dependency: "${selected.item.sourceModule}" now depends on "${selected.item.targetModule}".`
+        );
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to add dependency: ${error}`);
+    }
+}
+
+/**
  * Gets all modules in the workspace with their dependencies
  */
 async function getAllModules(workspaceUri: vscode.Uri): Promise<ModuleDependency[]> {
@@ -229,8 +307,9 @@ async function getAllModules(workspaceUri: vscode.Uri): Promise<ModuleDependency
     try {
         const data = await vscode.workspace.fs.readFile(modulesJsonUri);
         const modulesConfig = JSON.parse(Buffer.from(data).toString());
+        const moduleEntries = getRegistryModules(modulesConfig);
 
-        for (const moduleConfig of modulesConfig.modules) {
+        for (const moduleConfig of moduleEntries) {
             // Find the module directory
             const modulePath = await findModulePath(workspaceUri, moduleConfig.name);
             if (!modulePath) {
@@ -242,7 +321,7 @@ async function getAllModules(workspaceUri: vscode.Uri): Promise<ModuleDependency
 
             modules.push({
                 moduleName: moduleConfig.name,
-                modulePath: path.relative(workspaceUri.fsPath, modulePath),
+                modulePath: path.relative(workspaceUri.fsPath, modulePath).replace(/\\/g, '/'),
                 dependencies
             });
         }
@@ -251,6 +330,20 @@ async function getAllModules(workspaceUri: vscode.Uri): Promise<ModuleDependency
     }
 
     return modules;
+}
+
+function getRegistryModules(modulesConfig: any): RegistryModule[] {
+    const registryModules = modulesConfig?.modules;
+
+    if (Array.isArray(registryModules)) {
+        return registryModules.filter((entry: any) => typeof entry?.name === 'string');
+    }
+
+    if (registryModules && typeof registryModules === 'object') {
+        return Object.values(registryModules).filter((entry: any) => typeof entry?.name === 'string') as RegistryModule[];
+    }
+
+    return [];
 }
 
 /**
@@ -484,4 +577,81 @@ async function removeDependencyFromConfig(
     }
 
     throw new Error('Could not find module config file');
+}
+
+async function findMissingDependencies(
+    workspaceUri: vscode.Uri,
+    modules: ModuleDependency[]
+): Promise<MissingDependency[]> {
+    const moduleByName = new Map<string, ModuleDependency>();
+    for (const module of modules) {
+        moduleByName.set(module.moduleName, module);
+    }
+
+    const results = new Map<string, MissingDependency>();
+
+    for (const sourceModule of modules) {
+        const sourceModuleRoot = vscode.Uri.file(path.join(workspaceUri.fsPath, sourceModule.modulePath));
+        const pattern = new vscode.RelativePattern(sourceModuleRoot, 'src/**/*.{ts,tsx,js,jsx}');
+        const files = await vscode.workspace.findFiles(pattern);
+
+        for (const file of files) {
+            const data = await vscode.workspace.fs.readFile(file);
+            const content = Buffer.from(data).toString();
+            const imports = extractImportSpecifiers(content);
+
+            for (const specifier of imports) {
+                const targetModuleName = extractAliasedModuleName(specifier);
+                if (!targetModuleName || targetModuleName === sourceModule.moduleName) {
+                    continue;
+                }
+
+                const targetModule = moduleByName.get(targetModuleName);
+                if (!targetModule) {
+                    continue;
+                }
+
+                if (sourceModule.dependencies.includes(targetModuleName)) {
+                    continue;
+                }
+
+                const key = `${sourceModule.moduleName}->${targetModuleName}`;
+                if (!results.has(key)) {
+                    results.set(key, {
+                        sourceModule: sourceModule.moduleName,
+                        sourceModulePath: sourceModule.modulePath,
+                        targetModule: targetModule.moduleName,
+                        targetModulePath: targetModule.modulePath,
+                        filePath: file.fsPath
+                    });
+                }
+            }
+        }
+    }
+
+    return Array.from(results.values());
+}
+
+function extractImportSpecifiers(source: string): string[] {
+    const specifiers = new Set<string>();
+
+    const importRegex = /import\s+(?:[^'";]+\s+from\s+)?['"]([^'"]+)['"]/g;
+    const dynamicImportRegex = /import\(\s*['"]([^'"]+)['"]\s*\)/g;
+    const requireRegex = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+    for (const regex of [importRegex, dynamicImportRegex, requireRegex]) {
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(source)) !== null) {
+            if (match[1]) {
+                specifiers.add(match[1]);
+            }
+        }
+    }
+
+    return Array.from(specifiers);
+}
+
+function extractAliasedModuleName(importSpecifier: string): string | null {
+    const aliasMatch = importSpecifier.match(/^@([^/]+)\//);
+    return aliasMatch ? aliasMatch[1] : null;
 }
