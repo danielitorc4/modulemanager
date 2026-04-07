@@ -294,7 +294,8 @@ Benefits:
 
 - Node.js >= 16.x
 - npm >= 8.x
-- Visual Studio Code >= 1.104.0
+- Visual Studio Code >= 1.140.0
+
 
 ### Building
 
