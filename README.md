@@ -42,6 +42,7 @@ ModuleManager brings IntelliJ IDEA's powerful module system to Visual Studio Cod
 - **IntelliSense Support**: Full autocompletion and type checking across modules
 - **Dependency Validation**: Detect missing module references from import usage and apply one-click fixes
 - **Deletion Reconciliation**: Automatically prunes deleted modules from registry and root config
+- **Nested Module Support**: Dependency commands resolve modules using stored registry paths, including nested layouts (for example `src/database/sql`)
 
 ## Installation
 
@@ -151,6 +152,10 @@ Automated dependency management commands are available:
 - `Show Module Dependencies`
 - `Validate Module Dependencies`
 
+Dependency commands target the workspace inferred from the command context (resource/active editor), with a workspace picker fallback when needed.
+
+References added by commands are stored as normalized relative paths from the source module root.
+
 ## Configuration
 
 ### Root Configuration
@@ -220,17 +225,21 @@ The extension maintains a registry at `.vscode/modules.json`:
       "name": "ModuleA",
       "type": "basic",
       "createdAt": "2025-10-28T10:30:00.000Z",
-      "structure": ["src", "test", "resources", "lib", "README.md"]
+      "structure": ["src", "test", "resources", "lib", "README.md"],
+      "path": "src/ModuleA"
     },
     "ModuleB": {
       "name": "ModuleB",
       "type": "basic",
       "createdAt": "2025-10-28T11:45:00.000Z",
-      "structure": ["src", "test", "resources", "lib", "README.md"]
+      "structure": ["src", "test", "resources", "lib", "README.md"],
+      "path": "src/platform/database/ModuleB"
     }
   }
 }
 ```
+
+The `path` field is used by dependency commands to resolve modules accurately, including nested module folders.
 
 ### VSCode Settings
 

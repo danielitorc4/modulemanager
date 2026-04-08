@@ -64,6 +64,8 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
     }
 
     const moduleUri = vscode.Uri.joinPath(parentUri, moduleName);
+    const modulePath = path.relative(workspaceFolder.uri.fsPath, moduleUri.fsPath).replace(/\\/g, '/');
+    let moduleRegistered = false;
 
     try {
         // Create module directory structure
@@ -75,8 +77,9 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
             type: moduleType.value as ModuleConfig['type'],
             createdAt: new Date().toISOString(),
             structure,
-            path: path.relative(workspaceFolder.uri.fsPath, moduleUri.fsPath).replace(/\\/g, '/')
+            path: modulePath
         });
+        moduleRegistered = true;
 
         // Create a .module marker file
         const moduleMarkerUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.MODULE_MARKER);
@@ -89,17 +92,16 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
             }, null, 2))
         );
 
-        try {
-            await updateProjectConfig(workspaceFolder.uri, moduleUri, moduleName);
-        } catch (configError) {
-            await rollbackModuleCreation(workspaceFolder.uri, moduleUri, moduleName);
-            throw new Error(`Project configuration update failed: ${configError}`);
-        }
+        await updateProjectConfig(workspaceFolder.uri, moduleUri, moduleName);
 
         vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
         return moduleUri;
 
     } catch (error) {
+        if (moduleRegistered) {
+            await rollbackModuleCreation(workspaceFolder.uri, moduleUri, moduleName, modulePath);
+        }
+
         vscode.window.showErrorMessage(`Failed to create module: ${error}`);
         return null;
     }
@@ -161,15 +163,38 @@ async function registerModule(workspaceUri: vscode.Uri, moduleConfig: ModuleConf
 async function rollbackModuleCreation(
     workspaceUri: vscode.Uri,
     moduleUri: vscode.Uri,
-    moduleName: string
+    moduleName: string,
+    modulePath?: string
 ): Promise<void> {
     // Best-effort rollback to avoid leaving partially configured modules.
     await unregisterModule(workspaceUri, moduleName);
+    await cleanupModuleReferencesAcrossWorkspaces(workspaceUri, moduleName, modulePath);
 
     try {
         await vscode.workspace.fs.delete(moduleUri, { recursive: true, useTrash: false });
     } catch {
         // If cleanup fails, the command still reports the original failure.
+    }
+}
+
+async function cleanupModuleReferencesAcrossWorkspaces(
+    primaryWorkspaceUri: vscode.Uri,
+    moduleName: string,
+    modulePath?: string
+): Promise<void> {
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+
+    for (const workspaceFolder of workspaceFolders) {
+        try {
+            const isPrimaryWorkspace = workspaceFolder.uri.toString() === primaryWorkspaceUri.toString();
+            await removeModuleFromProjectConfig(
+                workspaceFolder.uri,
+                moduleName,
+                isPrimaryWorkspace ? modulePath : undefined
+            );
+        } catch (error) {
+            console.error(`Failed to clean module references for ${workspaceFolder.name}:`, error);
+        }
     }
 }
 

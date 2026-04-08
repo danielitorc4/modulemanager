@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { resolveWorkspaceFolder } from '../utils/utils';
 
 interface ModuleDependency {
     moduleName: string;
@@ -9,6 +10,7 @@ interface ModuleDependency {
 
 type RegistryModule = {
     name: string;
+    path?: string;
 };
 
 interface MissingDependency {
@@ -23,8 +25,8 @@ interface MissingDependency {
  * Adds a dependency from one module to another
  * Validates against circular dependencies before adding
  */
-export async function addModuleDependency(): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<void> {
+    const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
     if (!workspaceFolder) {
         vscode.window.showErrorMessage('No workspace folder open.');
         return;
@@ -107,8 +109,8 @@ export async function addModuleDependency(): Promise<void> {
 /**
  * Removes a dependency from a module
  */
-export async function removeModuleDependency(): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<void> {
+    const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
     if (!workspaceFolder) {
         vscode.window.showErrorMessage('No workspace folder open.');
         return;
@@ -182,8 +184,8 @@ export async function removeModuleDependency(): Promise<void> {
 /**
  * Shows all module dependencies in the project
  */
-export async function showModuleDependencies(): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+export async function showModuleDependencies(resourceUri?: vscode.Uri): Promise<void> {
+    const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
     if (!workspaceFolder) {
         vscode.window.showErrorMessage('No workspace folder open.');
         return;
@@ -233,8 +235,8 @@ export async function showModuleDependencies(): Promise<void> {
 /**
  * Validates imports across modules and offers a one-click fix to add missing dependencies.
  */
-export async function validateModuleDependencies(): Promise<void> {
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+export async function validateModuleDependencies(resourceUri?: vscode.Uri): Promise<void> {
+    const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
     if (!workspaceFolder) {
         vscode.window.showErrorMessage('No workspace folder open.');
         return;
@@ -311,7 +313,7 @@ async function getAllModules(workspaceUri: vscode.Uri): Promise<ModuleDependency
 
         for (const moduleConfig of moduleEntries) {
             // Find the module directory
-            const modulePath = await findModulePath(workspaceUri, moduleConfig.name);
+            const modulePath = await findModulePath(workspaceUri, moduleConfig.name, moduleConfig.path);
             if (!modulePath) {
                 continue;
             }
@@ -336,11 +338,21 @@ function getRegistryModules(modulesConfig: any): RegistryModule[] {
     const registryModules = modulesConfig?.modules;
 
     if (Array.isArray(registryModules)) {
-        return registryModules.filter((entry: any) => typeof entry?.name === 'string');
+        return registryModules
+            .filter((entry: any) => typeof entry?.name === 'string')
+            .map((entry: any) => ({
+                name: entry.name,
+                path: typeof entry.path === 'string' ? entry.path : undefined
+            }));
     }
 
     if (registryModules && typeof registryModules === 'object') {
-        return Object.values(registryModules).filter((entry: any) => typeof entry?.name === 'string') as RegistryModule[];
+        return Object.values(registryModules)
+            .filter((entry: any) => typeof entry?.name === 'string')
+            .map((entry: any) => ({
+                name: entry.name,
+                path: typeof entry.path === 'string' ? entry.path : undefined
+            }));
     }
 
     return [];
@@ -349,13 +361,23 @@ function getRegistryModules(modulesConfig: any): RegistryModule[] {
 /**
  * Finds the full path of a module by name
  */
-async function findModulePath(workspaceUri: vscode.Uri, moduleName: string): Promise<string | null> {
-    // Search in common locations
-    const possiblePaths = [
+async function findModulePath(
+    workspaceUri: vscode.Uri,
+    moduleName: string,
+    storedModulePath?: string
+): Promise<string | null> {
+    const possiblePaths: string[] = [];
+
+    if (storedModulePath) {
+        possiblePaths.push(path.join(workspaceUri.fsPath, storedModulePath));
+    }
+
+    // Legacy fallback locations for older registry entries.
+    possiblePaths.push(
         path.join(workspaceUri.fsPath, moduleName),
         path.join(workspaceUri.fsPath, 'src', moduleName),
         path.join(workspaceUri.fsPath, 'modules', moduleName)
-    ];
+    );
 
     for (const possiblePath of possiblePaths) {
         try {
@@ -520,11 +542,11 @@ async function addDependencyToConfig(
 
             // Add reference if it doesn't exist
             const refExists = config.references.some((ref: any) =>
-                ref.path === relativePath || ref.path === `./${relativePath}`
+                typeof ref?.path === 'string' && normalizeDependencyReferencePath(ref.path) === normalizeDependencyReferencePath(relativePath)
             );
 
             if (!refExists) {
-                config.references.push({ path: `../${path.basename(targetModulePath)}` });
+                config.references.push({ path: normalizeDependencyReferencePath(relativePath) });
             }
 
             // Write updated config
@@ -548,7 +570,9 @@ async function removeDependencyFromConfig(
     targetModulePath: string
 ): Promise<void> {
     const sourceModuleUri = vscode.Uri.file(path.join(workspaceUri.fsPath, sourceModulePath));
-    const targetModuleName = path.basename(targetModulePath);
+    const canonicalTargetRef = normalizeDependencyReferencePath(
+        path.relative(sourceModuleUri.fsPath, path.join(workspaceUri.fsPath, targetModulePath)).replace(/\\/g, '/')
+    );
     const configFiles = ['tsconfig.json', 'jsconfig.json'];
 
     for (const configFile of configFiles) {
@@ -563,8 +587,11 @@ async function removeDependencyFromConfig(
 
             // Remove the reference
             config.references = config.references.filter((ref: any) => {
-                const refPath = ref.path.replace(/^\.\.\//, '');
-                return refPath !== targetModuleName;
+                if (typeof ref?.path !== 'string') {
+                    return true;
+                }
+
+                return normalizeDependencyReferencePath(ref.path) !== canonicalTargetRef;
             });
 
             // Write updated config
@@ -632,7 +659,7 @@ async function findMissingDependencies(
     return Array.from(results.values());
 }
 
-function extractImportSpecifiers(source: string): string[] {
+export function extractImportSpecifiers(source: string): string[] {
     const specifiers = new Set<string>();
 
     const importRegex = /import\s+(?:[^'";]+\s+from\s+)?['"]([^'"]+)['"]/g;
@@ -651,7 +678,11 @@ function extractImportSpecifiers(source: string): string[] {
     return Array.from(specifiers);
 }
 
-function extractAliasedModuleName(importSpecifier: string): string | null {
+export function extractAliasedModuleName(importSpecifier: string): string | null {
     const aliasMatch = importSpecifier.match(/^@([^/]+)\//);
     return aliasMatch ? aliasMatch[1] : null;
+}
+
+export function normalizeDependencyReferencePath(refPath: string): string {
+    return refPath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
 }
