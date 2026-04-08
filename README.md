@@ -15,7 +15,7 @@ A Visual Studio Code extension for managing project modules with IntelliJ IDEA-l
 - [Configuration](#configuration)
   - [Root Configuration](#root-configuration)
   - [Module Configuration](#module-configuration)
-  - [Module Registry](#module-registry)
+  - [Module Descriptor](#module-descriptor)
 - [Architecture](#architecture)
   - [Module Independence](#module-independence)
   - [Composite Projects](#composite-projects)
@@ -107,7 +107,7 @@ Each created module includes the required core artifacts:
 ```
 ModuleName/
 ├── tsconfig.json|jsconfig.json  # Module-specific configuration
-├── .module                 # Module marker (hidden by default)
+├── .module.json            # Module descriptor (source of truth)
 ├── src/                    # Source code
 ```
 
@@ -214,32 +214,22 @@ Key settings:
 - `references: []`: Empty by default (dependencies added manually)
 - `outDir`: Separate output directory for each module
 
-### Module Registry
+### Module Descriptor
 
-The extension maintains a registry at `.vscode/modules.json`:
+Each module stores its declarative descriptor in `.module.json`:
 
 ```json
 {
-  "modules": {
-    "ModuleA": {
-      "name": "ModuleA",
-      "type": "basic",
-      "createdAt": "2025-10-28T10:30:00.000Z",
-      "structure": ["src", "test", "resources", "lib", "README.md"],
-      "path": "src/ModuleA"
-    },
-    "ModuleB": {
-      "name": "ModuleB",
-      "type": "basic",
-      "createdAt": "2025-10-28T11:45:00.000Z",
-      "structure": ["src", "test", "resources", "lib", "README.md"],
-      "path": "src/platform/database/ModuleB"
-    }
-  }
+  "name": "ModuleA",
+  "type": "basic",
+  "createdAt": "2025-10-28T10:30:00.000Z",
+  "dependencies": ["ModuleB"],
+  "sourceRoot": "src",
+  "structure": ["src", "test", "resources", "lib", "README.md"]
 }
 ```
 
-The `path` field is used by dependency commands to resolve modules accurately, including nested module folders.
+Module descriptors are the source of truth; root and module tsconfig/jsconfig files are derived from them.
 
 ### VSCode Settings
 
@@ -248,7 +238,7 @@ The extension updates `.vscode/settings.json` to hide internal files:
 ```json
 {
   "files.exclude": {
-    "**/.module": true
+    "**/.module.json": true
   }
 }
 ```
@@ -256,7 +246,7 @@ The extension updates `.vscode/settings.json` to hide internal files:
 ### Git Configuration
 
 The extension updates `.gitignore` to exclude:
-- `.module` files
+- `.module.json` files
 - Compiled output (`dist/`)
 - TypeScript build info (`*.tsbuildinfo`)
 

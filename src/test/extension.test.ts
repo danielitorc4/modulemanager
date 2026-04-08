@@ -5,7 +5,7 @@ import {
 	extractAliasedModuleName,
 	extractImportSpecifiers,
 	normalizeDependencyReferencePath
-} from '../commands/dependencyManager';
+} from '../Commands/dependencyManager';
 
 suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');

@@ -1,8 +1,7 @@
 export const CONFIG_PATHS = {
-    MODULES_JSON: '.vscode/modules.json',
     TSCONFIG: 'tsconfig.json',
     JSCONFIG: 'jsconfig.json',
-    MODULE_MARKER: '.module'
+    MODULE_DESCRIPTOR: '.module.json'
 } as const;
 
 export const REGEX = {
