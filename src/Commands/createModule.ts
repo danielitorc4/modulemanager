@@ -64,12 +64,13 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
     }
 
     const moduleUri = vscode.Uri.joinPath(parentUri, moduleName);
-    const modulePath = path.relative(workspaceFolder.uri.fsPath, moduleUri.fsPath).replace(/\\/g, '/');
+    let modulePath = '';
     let moduleRegistered = false;
 
     try {
         // Create module directory structure
         const structure = await createModuleStructure(moduleUri, moduleType.value as ModuleConfig['type']);
+        modulePath = path.relative(workspaceFolder.uri.fsPath, moduleUri.fsPath).replace(/\\/g, '/');
 
         // Register the module in the project configuration
         await registerModule(workspaceFolder.uri, {
@@ -97,8 +98,14 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
         vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
         return moduleUri;
 
-    } catch (error) {
-        if (moduleRegistered) {
+        try {
+            if (moduleRegistered) {
+                await rollbackModuleCreation(workspaceFolder.uri, moduleUri, moduleName, modulePath);
+            } else {
+                await vscode.workspace.fs.delete(moduleUri, { recursive: true, useTrash: false });
+            }
+        } catch {
+            // Best-effort cleanup; preserve the original error for the user.
             await rollbackModuleCreation(workspaceFolder.uri, moduleUri, moduleName, modulePath);
         }
 

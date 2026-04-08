@@ -539,14 +539,15 @@ async function addDependencyToConfig(
                 sourceModuleUri.fsPath,
                 path.join(workspaceUri.fsPath, targetModulePath)
             ).replace(/\\/g, '/');
+            const normalizedRelativePath = normalizeDependencyReferencePath(relativePath);
 
             // Add reference if it doesn't exist
             const refExists = config.references.some((ref: any) =>
-                typeof ref?.path === 'string' && normalizeDependencyReferencePath(ref.path) === normalizeDependencyReferencePath(relativePath)
+                typeof ref?.path === 'string' && normalizeDependencyReferencePath(ref.path) === normalizedRelativePath
             );
 
             if (!refExists) {
-                config.references.push({ path: normalizeDependencyReferencePath(relativePath) });
+                config.references.push({ path: normalizedRelativePath });
             }
 
             // Write updated config

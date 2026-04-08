@@ -20,12 +20,9 @@ export function getSelectedDirectory(): string | null {
  */
 export async function promptUserToSelectDirectory(): Promise<vscode.Uri | null> {
     const selectedDirectory = getSelectedDirectory();
-    if (!selectedDirectory) {
-        return null;
-    }
 
     const options: vscode.OpenDialogOptions = {
-        defaultUri: vscode.Uri.file(selectedDirectory),
+        defaultUri: selectedDirectory ? vscode.Uri.file(selectedDirectory) : undefined,
         canSelectFolders: true,
         canSelectFiles: false,
         canSelectMany: false,
