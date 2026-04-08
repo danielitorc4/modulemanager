@@ -56,8 +56,14 @@ export function normalizeModuleDescriptor(parsed: any, fallbackModuleName?: stri
     const type = parsed?.type === 'maven' || parsed?.type === 'gradle' ? parsed.type : 'basic';
     const createdAt =
         typeof parsed?.createdAt === 'string' && parsed.createdAt.trim() ? parsed.createdAt : new Date().toISOString();
-    const dependencies = Array.isArray(parsed?.dependencies)
-        ? Array.from(new Set(parsed.dependencies.filter((dep: unknown): dep is string => typeof dep === 'string' && dep.trim() !== '')))
+    const dependencies: string[] = Array.isArray(parsed?.dependencies)
+        ? Array.from(
+            new Set(
+                (parsed.dependencies as unknown[]).filter(
+                    (dep): dep is string => typeof dep === 'string' && dep.trim() !== ''
+                )
+            )
+        )
         : [];
     const sourceRoot = typeof parsed?.sourceRoot === 'string' && parsed.sourceRoot.trim() ? parsed.sourceRoot : 'src';
     const structure = Array.isArray(parsed?.structure)
