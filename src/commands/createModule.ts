@@ -3,9 +3,9 @@ import * as vscode from 'vscode';
 import { promptUserToSelectDirectory, getWorkspaceFolder } from '../utils/utils';
 import { ModuleConfig } from '../types';
 import { CONFIG_PATHS, REGEX } from '../constants';
-import { generateMinimalPom } from '../build/pomManager';
 import { syncAllModules } from '../build/buildFileManager';
 import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescriptors';
+import { pomTemplate, buildGradleTemplate } from '../build/templates';
 
 export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
 	const workspaceFolder = resourceUri
@@ -45,7 +45,7 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
 
 	const moduleType = await vscode.window.showQuickPick(
 		[
-			{ label: 'Basic Module', value: 'basic', description: 'Simple module structure' },
+			{ label: 'Basic Module', value: 'basic', description: 'Eclipse metadata-managed Java module' },
 			{ label: 'Maven Module', value: 'maven', description: 'Module with user-managed pom.xml' },
 			{ label: 'Gradle Module', value: 'gradle', description: 'Module with user-managed build.gradle' }
 		],
@@ -59,23 +59,17 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
 	const moduleUri = vscode.Uri.joinPath(parentUri, moduleName);
 
 	try {
-		const structure = await createModuleStructure(moduleUri, moduleType.value as ModuleConfig['type']);
+		await createModuleStructure(moduleUri, moduleType.value as ModuleConfig['type']);
 		const descriptor: ModuleConfig = {
 			name: moduleName,
 			type: moduleType.value as ModuleConfig['type'],
 			createdAt: new Date().toISOString(),
-			dependencies: [],
-			sourceRoot: 'src',
-			structure
+			dependencies: []
 		};
 
 		await writeModuleDescriptor(moduleUri, descriptor);
 
-		if (descriptor.type === 'basic') {
-			await generateMinimalPom(moduleUri, descriptor);
-		}
-
-		await updateVSCodeSettings(workspaceFolder.uri, descriptor.type);
+		await updateVSCodeSettings(workspaceFolder.uri);
 		await syncAllModules(workspaceFolder.uri);
 		vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
 		return moduleUri;
@@ -91,39 +85,46 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
 	}
 }
 
-async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['type']): Promise<string[]> {
-	const structure: string[] = [];
+async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['type']): Promise<void> {
 
-	switch (type) {
-		case 'basic': {
-			const dirs = ['src/main/java', 'src/main/resources', 'src/test/java'];
-			for (const dir of dirs) {
-				const dirUri = vscode.Uri.joinPath(moduleUri, dir);
-				await vscode.workspace.fs.createDirectory(dirUri);
-				structure.push(dir);
-			}
-			break;
-		}
-		case 'maven':
-		case 'gradle': {
-			const dirs = ['src/main/java', 'src/main/resources', 'src/test/java'];
-			for (const dir of dirs) {
-				const dirUri = vscode.Uri.joinPath(moduleUri, dir);
-				await vscode.workspace.fs.createDirectory(dirUri);
-				structure.push(dir);
-			}
-			break;
-		}
-	}
+    // helper to create standard Java source/resource/test directories
+    async function createJavaDirs(targetUri: vscode.Uri): Promise<void> {
+        const dirs = ['src/main/java', 'src/main/resources', 'src/test/java'];
+        for (const dir of dirs) {
+            const dirUri = vscode.Uri.joinPath(targetUri, dir);
+            await vscode.workspace.fs.createDirectory(dirUri);
+        }
+    }
+
+    switch (type) {
+        case 'basic': {
+            await createJavaDirs(moduleUri);
+            break;
+        }
+        case 'maven': {
+            await createJavaDirs(moduleUri);
+
+            const artifactId = path.basename(moduleUri.fsPath);
+            const pom = pomTemplate(artifactId);
+            const pomUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.POM_XML);
+            await vscode.workspace.fs.writeFile(pomUri, Buffer.from(pom));
+            break;
+        }
+        case 'gradle': {
+            await createJavaDirs(moduleUri);
+
+            const buildGradle = buildGradleTemplate();
+            const gradleUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.BUILD_GRADLE);
+            await vscode.workspace.fs.writeFile(gradleUri, Buffer.from(buildGradle));
+            break;
+        }
+    }
 
 	const readmeUri = vscode.Uri.joinPath(moduleUri, 'README.md');
 	await vscode.workspace.fs.writeFile(
 		readmeUri,
 		Buffer.from(`# ${path.basename(moduleUri.fsPath)}\n\nModule created on ${new Date().toLocaleString()}\n`)
 	);
-	structure.push('README.md');
-
-	return structure;
 }
 
 export async function isModule(uri: vscode.Uri): Promise<boolean> {
@@ -169,7 +170,7 @@ function isInsideWorkspace(workspaceUri: vscode.Uri, selectedUri: vscode.Uri): b
 	return relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath);
 }
 
-async function updateVSCodeSettings(workspaceUri: vscode.Uri, moduleType: ModuleConfig['type']): Promise<void> {
+async function updateVSCodeSettings(workspaceUri: vscode.Uri): Promise<void> {
 	const vscodeDir = vscode.Uri.joinPath(workspaceUri, '.vscode');
 	const settingsUri = vscode.Uri.joinPath(vscodeDir, 'settings.json');
 
@@ -190,9 +191,8 @@ async function updateVSCodeSettings(workspaceUri: vscode.Uri, moduleType: Module
 		}
 
 		settings['files.exclude'][`**/${CONFIG_PATHS.MODULE_DESCRIPTOR}`] = true;
-		if (moduleType === 'basic') {
-			settings['files.exclude'][`**/${CONFIG_PATHS.POM_XML}`] = true;
-		}
+		settings['files.exclude'][`**/${CONFIG_PATHS.ECLIPSE_PROJECT}`] = true;
+		settings['files.exclude'][`**/${CONFIG_PATHS.ECLIPSE_CLASSPATH}`] = true;
 
 		await vscode.workspace.fs.writeFile(settingsUri, Buffer.from(JSON.stringify(settings, null, 2)));
 	} catch (error) {

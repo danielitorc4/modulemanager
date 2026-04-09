@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { REGEX } from '../constants';
 import { syncAllModules } from '../build/buildFileManager';
 import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescriptors';
 import { resolveWorkspaceFolder } from '../utils/utils';
@@ -17,6 +18,7 @@ interface MissingDependency {
 	targetModule: string;
 	targetModulePath: string;
 	filePath: string;
+	importName: string;
 }
 
 /**
@@ -229,7 +231,7 @@ export async function validateModuleDependencies(resourceUri?: vscode.Uri): Prom
 		missingDependencies.map(item => ({
 			label: `${item.sourceModule} -> ${item.targetModule}`,
 			description: path.relative(workspaceFolder.uri.fsPath, item.filePath),
-			detail: 'Add missing dependency',
+			detail: `Import: ${item.importName}`,
 			item
 		})),
 		{ placeHolder: 'Select a missing dependency to fix' }
@@ -398,15 +400,15 @@ async function findMissingDependencies(
 
 	for (const sourceModule of modules) {
 		const sourceRootUri = vscode.Uri.file(path.join(workspaceUri.fsPath, sourceModule.modulePath));
-		const pattern = new vscode.RelativePattern(sourceRootUri, 'src/**/*.{ts,tsx,js,jsx}');
+		const pattern = new vscode.RelativePattern(sourceRootUri, 'src/**/*.java');
 		const files = await vscode.workspace.findFiles(pattern);
 
 		for (const file of files) {
 			const content = Buffer.from(await vscode.workspace.fs.readFile(file)).toString();
-			const imports = extractImportSpecifiers(content);
+			const imports = extractJavaImportSpecifiers(content);
 
 			for (const importSpecifier of imports) {
-				const targetModuleName = extractAliasedModuleName(importSpecifier);
+				const targetModuleName = extractJavaModuleName(importSpecifier, moduleByName);
 				if (!targetModuleName || targetModuleName === sourceModule.moduleName) {
 					continue;
 				}
@@ -423,7 +425,8 @@ async function findMissingDependencies(
 						sourceModulePath: sourceModule.modulePath,
 						targetModule: targetModule.moduleName,
 						targetModulePath: targetModule.modulePath,
-						filePath: file.fsPath
+						filePath: file.fsPath,
+						importName: importSpecifier
 					});
 				}
 			}
@@ -433,29 +436,37 @@ async function findMissingDependencies(
 	return Array.from(missingDependencies.values());
 }
 
-export function extractImportSpecifiers(source: string): string[] {
+export function extractJavaImportSpecifiers(source: string): string[] {
 	const specifiers = new Set<string>();
-	const importRegex = /import\s+(?:[^'";]+\s+from\s+)?['"]([^'"]+)['"]/g;
-	const dynamicImportRegex = /import\(\s*['"]([^'"]+)['"]\s*\)/g;
-	const requireRegex = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
+	let match: RegExpExecArray | null;
 
-	for (const regex of [importRegex, dynamicImportRegex, requireRegex]) {
-		let match: RegExpExecArray | null;
-		while ((match = regex.exec(source)) !== null) {
-			if (match[1]) {
-				specifiers.add(match[1]);
-			}
+	REGEX.JAVA_IMPORT.lastIndex = 0;
+	while ((match = REGEX.JAVA_IMPORT.exec(source)) !== null) {
+		const importName = match[1]?.trim();
+		if (!importName) {
+			continue;
 		}
+
+		if (importName.startsWith('java.') || importName.startsWith('javax.')) {
+			continue;
+		}
+
+		specifiers.add(importName);
 	}
 
 	return Array.from(specifiers);
 }
 
-export function extractAliasedModuleName(importSpecifier: string): string | null {
-	const aliasMatch = importSpecifier.match(/^@([^/]+)\//);
-	return aliasMatch ? aliasMatch[1] : null;
-}
+export function extractJavaModuleName(
+	importSpecifier: string,
+	moduleByName: Map<string, ModuleDependency>
+): string | null {
+	for (const moduleName of moduleByName.keys()) {
+		const prefix = `${moduleName}.`;
+		if (importSpecifier === moduleName || importSpecifier.startsWith(prefix)) {
+			return moduleName;
+		}
+	}
 
-export function normalizeDependencyReferencePath(refPath: string): string {
-	return refPath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+	return null;
 }

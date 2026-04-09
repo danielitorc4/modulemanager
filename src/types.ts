@@ -1,10 +1,10 @@
+export type ModuleType = 'basic' | 'maven' | 'gradle';
+
 export interface ModuleConfig {
     name: string;
-    type: 'basic' | 'maven' | 'gradle';
+    type: ModuleType;
     createdAt: string;
     dependencies: string[];
-    sourceRoot: string;
-    structure?: string[];
     path?: string;
 }
 

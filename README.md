@@ -1,432 +1,93 @@
 # ModuleManager
 
-A Visual Studio Code extension for managing project modules with IntelliJ IDEA-like structure and dependency management.
+ModuleManager is a Visual Studio Code extension that brings IntelliJ-style Java module isolation to VSCode.
 
-## Table of Contents
+## What this extension does
 
-- [Overview](#overview)
-- [Features](#features)
-- [Installation](#installation)
-- [Getting Started](#getting-started)
-- [Usage](#usage)
-  - [Creating Modules](#creating-modules)
-  - [Module Structure](#module-structure)
-  - [Managing Dependencies](#managing-dependencies)
-- [Configuration](#configuration)
-  - [Root Configuration](#root-configuration)
-  - [Module Configuration](#module-configuration)
-  - [Module Descriptor](#module-descriptor)
-- [Architecture](#architecture)
-  - [Module Independence](#module-independence)
-  - [Composite Projects](#composite-projects)
-- [Development](#development)
-  - [Prerequisites](#prerequisites)
-  - [Building](#building)
-  - [Testing](#testing)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+- Uses .module.json as the only source of truth.
+- Generates Eclipse metadata per module:
+  - .project
+  - .classpath
+- Enforces explicit module dependencies at the editor classpath level.
+- Supports three Java module flavors:
+  - basic: extension-managed Eclipse metadata only
+  - maven: user-managed pom.xml, extension-managed dependency block
+  - gradle: user-managed build.gradle, extension-managed dependency block
 
-## Overview
+## Descriptor schema policy
 
-ModuleManager brings IntelliJ IDEA's powerful module system to Visual Studio Code. It allows developers to organize large projects into independent, manageable modules with explicit dependency declarations, preventing accidental coupling and naming conflicts.
+This version uses a strict descriptor schema.
 
-## Features
+Only these fields are supported in .module.json:
+- name
+- type
+- createdAt
+- dependencies
 
-- **Structured Module Creation**: Generate modules with required core artifacts and optional template-driven folders
-- **Module Independence**: Modules are isolated by default, similar to IntelliJ IDEA's module system
-- **Explicit Dependencies**: Declare module dependencies explicitly when needed
-- **Automatic Configuration**: Updates TypeScript/JavaScript configuration files automatically
-- **Multi-root Workspace Support**: Seamlessly works with VSCode multi-root workspaces
-- **Path Aliases**: Clean imports using `@ModuleName/*` syntax
-- **IntelliSense Support**: Full autocompletion and type checking across modules
-- **Dependency Validation**: Detect missing module references from import usage and apply one-click fixes
-- **Deletion Reconciliation**: Automatically prunes deleted modules from registry and root config
-- **Nested Module Support**: Dependency commands resolve modules using stored registry paths, including nested layouts (for example `src/database/sql`)
+Any other fields make the descriptor invalid and it will be ignored until corrected.
 
-## Installation
+## Descriptor format
 
-### From Source
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/danielitorc4/modulemanager
-   cd modulemanager
-   ```
-
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Compile the extension:
-   ```bash
-   npm run compile
-   ```
-
-4. Press `F5` in VSCode to open the Extension Development Host
-
-### From Marketplace
-
-*Coming soon*
-
-## Getting Started
-
-1. Open a workspace folder in VSCode
-2. Right-click in the Explorer pane
-3. Select "Create Module" from the context menu
-4. Follow the prompts to configure your module
-
-The extension will automatically configure your project for module independence.
-
-## Usage
-
-### Creating Modules
-
-#### Via Context Menu
-
-1. Right-click on any folder in the Explorer
-2. Select **Create Module**
-3. Choose the parent directory for the module
-4. Enter a module name (alphanumeric, hyphens, and underscores only)
-5. Select module type:
-   - **Basic Module**: Simple module structure
-   - **Maven Module**: Maven-based structure (coming soon)
-   - **Gradle Module**: Gradle-based structure (coming soon)
-
-#### Via Command Palette
-
-1. Open Command Palette (`Ctrl+Shift+P` or `Cmd+Shift+P`)
-2. Type "Create Module"
-3. Follow the same steps as above
-
-### Module Structure
-
-Each created module includes the required core artifacts:
-
-```
-ModuleName/
-├── tsconfig.json|jsconfig.json  # Module-specific configuration
-├── .module.json            # Module descriptor (source of truth)
-├── src/                    # Source code
-```
-
-Optional folders and files (for example `test`, `resources`, `lib`, `README.md`) are template-driven and may vary per project.
-
-### Managing Dependencies
-
-By default, modules cannot access code from other modules. This prevents accidental dependencies and keeps modules loosely coupled.
-
-#### Adding a Dependency
-
-To allow ModuleB to use code from ModuleA:
-
-1. Open `ModuleB/jsconfig.json` (or `tsconfig.json`)
-2. Add ModuleA to the `references` array:
+Each module root must contain .module.json:
 
 ```json
 {
-  "compilerOptions": {
-    "composite": true,
-    "baseUrl": ".",
-    "rootDir": "./src"
-  },
-  "include": ["src/**/*"],
-  "references": [
-    { "path": "../ModuleA" }
-  ]
-}
-```
-
-3. Now you can import from ModuleA in ModuleB:
-
-```javascript
-import { Something } from '@ModuleA/something';
-```
-
-#### Automated Dependency Management
-
-Automated dependency management commands are available:
-- `Add Module Dependency`
-- `Remove Module Dependency`
-- `Show Module Dependencies`
-- `Validate Module Dependencies`
-
-Dependency commands target the workspace inferred from the command context (resource/active editor), with a workspace picker fallback when needed.
-
-References added by commands are stored as normalized relative paths from the source module root.
-
-## Configuration
-
-### Root Configuration
-
-The extension creates or updates a root `jsconfig.json` or `tsconfig.json` at your workspace root:
-
-**jsconfig.json**
-```json
-{
-  "compilerOptions": {
-    "baseUrl": ".",
-    "paths": {
-      "@ModuleA/*": ["src/ModuleA/src/*"],
-      "@ModuleB/*": ["src/ModuleB/src/*"]
-    }
-  },
-  "references": [
-    { "path": "./src/ModuleA" },
-    { "path": "./src/ModuleB" }
-  ]
-}
-```
-
-This configuration provides:
-- Global view of all modules
-- Path aliases for clean imports
-- Module references for composite projects
-
-### Module Configuration
-
-Each module has its own configuration with `composite: true`:
-
-**ModuleA/jsconfig.json**
-```json
-{
-  "compilerOptions": {
-    "composite": true,
-    "baseUrl": ".",
-    "rootDir": "./src",
-    "outDir": "./dist",
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "module": "ESNext",
-    "target": "ES2020",
-    "moduleResolution": "node"
-  },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"],
-  "references": []
-}
-```
-
-Key settings:
-- `composite: true`: Enables independent compilation
-- `references: []`: Empty by default (dependencies added manually)
-- `outDir`: Separate output directory for each module
-
-### Module Descriptor
-
-Each module stores its declarative descriptor in `.module.json`:
-
-```json
-{
-  "name": "ModuleA",
+  "name": "orders",
   "type": "basic",
-  "createdAt": "2025-10-28T10:30:00.000Z",
-  "dependencies": ["ModuleB"],
-  "sourceRoot": "src",
-  "structure": ["src", "test", "resources", "lib", "README.md"]
+  "createdAt": "2026-04-09T12:00:00.000Z",
+  "dependencies": ["billing"]
 }
 ```
 
-Module descriptors are the source of truth; root and module tsconfig/jsconfig files are derived from them.
+Rules:
+- name: letters, numbers, hyphen, underscore
+- type: basic | maven | gradle
+- dependencies: module names declared in this workspace
 
-### VSCode Settings
+## Module structure
 
-The extension updates `.vscode/settings.json` to hide internal files:
+Created modules use Java layout:
 
-```json
-{
-  "files.exclude": {
-    "**/.module.json": true
-  }
-}
+```text
+module-name/
+  .module.json
+  src/main/java
+  src/main/resources
+  src/test/java
+  README.md
 ```
 
-### Git Configuration
+## Commands
 
-The extension updates `.gitignore` to exclude:
-- `.module.json` files
-- Compiled output (`dist/`)
-- TypeScript build info (`*.tsbuildinfo`)
+- Create Module
+- Add Module Dependency
+- Remove Module Dependency
+- Show Module Dependencies
+- Validate Module Dependencies
 
-## Architecture
+Validation scans Java imports under src/**/*.java and offers one-click dependency fixes.
 
-### Module Independence
+## Metadata sync behavior
 
-ModuleManager implements true module independence inspired by IntelliJ IDEA:
+On module create/update/delete, the extension synchronizes all modules and updates:
+- .project (project metadata and project references)
+- .classpath (source folders and declared module dependency entries)
+- pom.xml dependencies block for maven modules (if pom.xml exists)
+- build.gradle dependencies block for gradle modules (if build.gradle exists)
 
-**Without Dependencies:**
-```
-ModuleA ─ ✗ ─ ModuleB
-```
-ModuleA cannot import from ModuleB, and vice versa.
-
-**With Explicit Dependency:**
-```
-ModuleA ← ✓ ─ ModuleB
-```
-After adding ModuleA to ModuleB's references, ModuleB can import from ModuleA.
-
-This architecture prevents:
-- Circular dependencies
-- Unintended coupling
-- Namespace collisions
-- Spaghetti code in large projects
-
-### Composite Projects
-
-The extension uses TypeScript/JavaScript's composite project feature:
-
-1. **Root Project**: Maintains global view and path mappings
-2. **Module Projects**: Independent compilation units with `composite: true`
-3. **Project References**: Explicit dependency graph via `references` array
-
-Benefits:
-- Faster incremental builds
-- Better IDE performance
-- Clear dependency boundaries
-- Parallel compilation (when supported)
+After sync, the extension triggers java.reloadProjects (with java.cleanWorkspace fallback).
 
 ## Development
 
-### Prerequisites
-
-- Node.js >= 16.x
-- npm >= 8.x
-- Visual Studio Code >= 1.140.0
-
-
-### Building
-
 ```bash
-# Install dependencies
 npm install
-
-# Compile TypeScript
 npm run compile
-
-# Watch mode for development
-npm run watch
-
-# Package for production
-npm run package
-```
-
-### Testing
-
-```bash
-# Run all tests
-npm test
-
-# Run specific test suite
-npm run test -- --grep "Module Creation"
-
-# Compile tests
 npm run compile-tests
-
-# Watch tests
-npm run watch-tests
+npm test
 ```
 
-### Running the Extension
+## Notes
 
-1. Open the project in VSCode
-2. Press `F5` to launch Extension Development Host
-3. Open a test workspace in the new window
-4. The extension will be active and ready to use
-
-### Debugging
-
-The extension includes launch configurations for debugging:
-
-- **Run Extension**: Launch the extension in debug mode
-- **Extension Tests**: Run and debug tests
-
-Set breakpoints in TypeScript files and use VSCode's debugging tools normally.
-
-## Roadmap
-
-### Version 0.3.0 (Current)
-
-- [x] Basic module creation with folder structure
-- [x] Multi-root workspace support
-- [x] Automatic jsconfig/tsconfig configuration
-- [x] Module independence via composite projects
-- [x] Path alias support for clean imports
-- [x] VSCode settings and gitignore management
-- [x] Command: Add Module Dependency
-- [x] Command: Remove Module Dependency
-- [x] Command: Show Module Dependencies
-- [x] Command: Validate Module Dependencies
-- [x] Module deletion reconciliation (registry + root config cleanup)
-
-### Version 0.4.0
-
-- [ ] Dependency graph visualization
-- [ ] Module renaming
-
-### Version 0.5.0
-
-- [ ] Maven module template
-- [ ] Gradle module template
-- [ ] Auto-generation of build files (pom.xml, build.gradle)
-- [ ] Java project structure support
-
-### Version 0.6.0
-
-- [ ] Custom module templates
-- [ ] Template import/export
-- [ ] Module scaffolding with code generation
-
-### Version 1.0.0
-
-- [ ] Stable API for extensions
-- [ ] Import existing modules from IntelliJ projects
-- [ ] Module refactoring tools
-- [ ] Complete documentation
-- [ ] VSCode Marketplace publication
-
-## Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-### Reporting Issues
-
-- Use the GitHub issue tracker
-- Include VSCode version and extension version
-- Provide reproduction steps
-- Include relevant configuration files
-
-### Pull Requests
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-### Code Style
-
-- Follow existing TypeScript conventions
-- Use meaningful variable and function names
-- Add comments for complex logic
-- Update documentation for user-facing changes
-
-### Testing
-
-- Add tests for new features
-- Ensure all tests pass before submitting PR
-- Aim for >80% code coverage
-
-## License
-
-[MIT License](.github/MIT%20License.txt)
-
-## Author
-
-[Danielitorc4]
-
-## Acknowledgments
-
-This extension is inspired by IntelliJ IDEA's module system and aims to bring similar functionality to Visual Studio Code.
+- files.exclude only affects Explorer visibility; it does not change jdt.ls behavior.
+- Isolation depends on generated metadata and declared dependencies, not hidden files.
+- Java reload commands are executed only when provided by the Java extension; without JDK/Red Hat Java activation they are skipped.

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { CONFIG_PATHS } from '../constants';
 import { findModuleDescriptors } from '../moduleDescriptors';
 import * as gradleManager from './gradleManager';
+import * as eclipseMetadataManager from './eclipseMetadataManager';
 import * as pomManager from './pomManager';
 
 export async function syncAllModules(workspaceUri: vscode.Uri): Promise<void> {
@@ -10,14 +11,9 @@ export async function syncAllModules(workspaceUri: vscode.Uri): Promise<void> {
     for (const module of modules) {
         const { descriptor, moduleUri } = module;
 
-        if (descriptor.type === 'basic') {
-            const pomUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.POM_XML);
-            const hasPom = await fileExists(pomUri);
-            if (!hasPom) {
-                await pomManager.generateMinimalPom(moduleUri, descriptor);
-            }
+        await eclipseMetadataManager.syncModuleMetadata(workspaceUri, module, modules);
 
-            await pomManager.syncModuleDependencies(moduleUri, descriptor.dependencies, modules);
+        if (descriptor.type === 'basic') {
             continue;
         }
 

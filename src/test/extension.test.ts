@@ -2,35 +2,33 @@ import * as assert from 'assert';
 
 import * as vscode from 'vscode';
 import {
-	extractAliasedModuleName,
-	extractImportSpecifiers,
-	normalizeDependencyReferencePath
+	extractJavaImportSpecifiers,
+	extractJavaModuleName
 } from '../commands/dependencyManager';
 
 suite('Extension Test Suite', () => {
 	vscode.window.showInformationMessage('Start all tests.');
 
-	test('Normalizes dependency reference paths', () => {
-		assert.strictEqual(normalizeDependencyReferencePath('./module-a/'), 'module-a');
-		assert.strictEqual(normalizeDependencyReferencePath('..\\shared\\core'), '../shared/core');
-		assert.strictEqual(normalizeDependencyReferencePath('src/module-b'), 'src/module-b');
-	});
-
-	test('Extracts import specifiers from static, dynamic and require imports', () => {
+	test('Extracts Java import specifiers and skips JDK imports', () => {
 		const source = [
-			"import { a } from '@alpha/foo';",
-			"const b = await import('@beta/bar');",
-			"const c = require('@gamma/baz');"
+			'import com.orders.service.OrderService;',
+			'import static com.billing.util.MoneyUtil.round;',
+			'import java.util.List;',
+			'import javax.inject.Inject;'
 		].join('\n');
 
-		const specifiers = extractImportSpecifiers(source);
-		assert.deepStrictEqual(specifiers.sort(), ['@alpha/foo', '@beta/bar', '@gamma/baz']);
+		const imports = extractJavaImportSpecifiers(source);
+		assert.deepStrictEqual(imports.sort(), ['com.billing.util.MoneyUtil.round', 'com.orders.service.OrderService']);
 	});
 
-	test('Extracts module alias names for supported format', () => {
-		assert.strictEqual(extractAliasedModuleName('@orders/api'), 'orders');
-		assert.strictEqual(extractAliasedModuleName('@billing/domain/models'), 'billing');
-		assert.strictEqual(extractAliasedModuleName('./local/file'), null);
-		assert.strictEqual(extractAliasedModuleName('react'), null);
+	test('Extracts module names from Java import specifiers', () => {
+		const moduleByName = new Map([
+			['orders', { moduleName: 'orders' } as any],
+			['billing', { moduleName: 'billing' } as any]
+		]);
+
+		assert.strictEqual(extractJavaModuleName('orders.service.OrderService', moduleByName), 'orders');
+		assert.strictEqual(extractJavaModuleName('billing.internal.MoneyUtil', moduleByName), 'billing');
+		assert.strictEqual(extractJavaModuleName('com.external.SomeLibrary', moduleByName), null);
 	});
 });
