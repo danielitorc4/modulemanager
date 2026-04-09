@@ -4,9 +4,9 @@ import {
 	addModuleDependency,
 	removeModuleDependency,
 	showModuleDependencies,
-	validateModuleDependencies,
-	pruneDeletedModules
-} from './Commands';
+	validateModuleDependencies
+} from './commands';
+import { syncAllModules } from './build/buildFileManager';
 
 export function activate(context: vscode.ExtensionContext) {
 	console.log('Congratulations, your extension "modulemanager" is now active!');
@@ -55,9 +55,9 @@ async function reconcileAllWorkspaces(): Promise<void> {
 	const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
 	for (const workspaceFolder of workspaceFolders) {
 		try {
-			await pruneDeletedModules(workspaceFolder.uri);
+			await syncAllModules(workspaceFolder.uri);
 		} catch (error) {
-			console.error(`Module prune failed for ${workspaceFolder.name}:`, error);
+			console.error(`Module sync failed for ${workspaceFolder.name}:`, error);
 		}
 	}
 }
@@ -65,7 +65,7 @@ async function reconcileAllWorkspaces(): Promise<void> {
 async function reconcileWorkspaceFromUri(uri: vscode.Uri): Promise<void> {
 	const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
 	if (workspaceFolder) {
-		await pruneDeletedModules(workspaceFolder.uri);
+		await syncAllModules(workspaceFolder.uri);
 		return;
 	}
 

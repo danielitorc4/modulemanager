@@ -3,7 +3,8 @@ import * as vscode from 'vscode';
 import { promptUserToSelectDirectory, getWorkspaceFolder } from '../utils/utils';
 import { ModuleConfig } from '../types';
 import { CONFIG_PATHS, REGEX } from '../constants';
-import { syncWorkspaceModuleConfigs } from '../config/configManager';
+import { generateMinimalPom } from '../build/pomManager';
+import { syncAllModules } from '../build/buildFileManager';
 import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescriptors';
 
 export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
@@ -45,8 +46,8 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
 	const moduleType = await vscode.window.showQuickPick(
 		[
 			{ label: 'Basic Module', value: 'basic', description: 'Simple module structure' },
-			{ label: 'Maven Module', value: 'maven', description: 'Maven-based module (coming soon)', detail: 'Not yet implemented' },
-			{ label: 'Gradle Module', value: 'gradle', description: 'Gradle-based module (coming soon)', detail: 'Not yet implemented' }
+			{ label: 'Maven Module', value: 'maven', description: 'Module with user-managed pom.xml' },
+			{ label: 'Gradle Module', value: 'gradle', description: 'Module with user-managed build.gradle' }
 		],
 		{ placeHolder: 'Select module type' }
 	);
@@ -55,24 +56,27 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
 		return null;
 	}
 
-	if (moduleType.value !== 'basic') {
-		vscode.window.showWarningMessage(`${moduleType.label} is not yet implemented. Creating a basic module instead.`);
-	}
-
 	const moduleUri = vscode.Uri.joinPath(parentUri, moduleName);
 
 	try {
 		const structure = await createModuleStructure(moduleUri, moduleType.value as ModuleConfig['type']);
-		await writeModuleDescriptor(moduleUri, {
+		const descriptor: ModuleConfig = {
 			name: moduleName,
 			type: moduleType.value as ModuleConfig['type'],
 			createdAt: new Date().toISOString(),
 			dependencies: [],
 			sourceRoot: 'src',
 			structure
-		});
+		};
 
-		await syncWorkspaceModuleConfigs(workspaceFolder.uri);
+		await writeModuleDescriptor(moduleUri, descriptor);
+
+		if (descriptor.type === 'basic') {
+			await generateMinimalPom(moduleUri, descriptor);
+		}
+
+		await updateVSCodeSettings(workspaceFolder.uri, descriptor.type);
+		await syncAllModules(workspaceFolder.uri);
 		vscode.window.showInformationMessage(`Module "${moduleName}" created successfully!`);
 		return moduleUri;
 	} catch (error) {
@@ -92,25 +96,32 @@ async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['
 
 	switch (type) {
 		case 'basic': {
-			const dirs = ['src', 'test', 'resources', 'lib'];
+			const dirs = ['src/main/java', 'src/main/resources', 'src/test/java'];
 			for (const dir of dirs) {
 				const dirUri = vscode.Uri.joinPath(moduleUri, dir);
 				await vscode.workspace.fs.createDirectory(dirUri);
 				structure.push(dir);
 			}
-
-			const readmeUri = vscode.Uri.joinPath(moduleUri, 'README.md');
-			await vscode.workspace.fs.writeFile(
-				readmeUri,
-				Buffer.from(`# ${path.basename(moduleUri.fsPath)}\n\nModule created on ${new Date().toLocaleString()}\n`)
-			);
-			structure.push('README.md');
 			break;
 		}
 		case 'maven':
-		case 'gradle':
+		case 'gradle': {
+			const dirs = ['src/main/java', 'src/main/resources', 'src/test/java'];
+			for (const dir of dirs) {
+				const dirUri = vscode.Uri.joinPath(moduleUri, dir);
+				await vscode.workspace.fs.createDirectory(dirUri);
+				structure.push(dir);
+			}
 			break;
+		}
 	}
+
+	const readmeUri = vscode.Uri.joinPath(moduleUri, 'README.md');
+	await vscode.workspace.fs.writeFile(
+		readmeUri,
+		Buffer.from(`# ${path.basename(moduleUri.fsPath)}\n\nModule created on ${new Date().toLocaleString()}\n`)
+	);
+	structure.push('README.md');
 
 	return structure;
 }
@@ -158,6 +169,33 @@ function isInsideWorkspace(workspaceUri: vscode.Uri, selectedUri: vscode.Uri): b
 	return relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath);
 }
 
-export async function pruneDeletedModules(workspaceUri: vscode.Uri): Promise<void> {
-	await syncWorkspaceModuleConfigs(workspaceUri);
+async function updateVSCodeSettings(workspaceUri: vscode.Uri, moduleType: ModuleConfig['type']): Promise<void> {
+	const vscodeDir = vscode.Uri.joinPath(workspaceUri, '.vscode');
+	const settingsUri = vscode.Uri.joinPath(vscodeDir, 'settings.json');
+
+	try {
+		await vscode.workspace.fs.createDirectory(vscodeDir);
+
+		let settings: any = {};
+		try {
+			const settingsData = await vscode.workspace.fs.readFile(settingsUri);
+			const settingsText = Buffer.from(settingsData).toString();
+			settings = JSON.parse(settingsText.replace(REGEX.JSON_COMMENTS, ''));
+		} catch {
+			// Initialize empty settings if file doesn't exist or has invalid JSON.
+		}
+
+		if (!settings['files.exclude']) {
+			settings['files.exclude'] = {};
+		}
+
+		settings['files.exclude'][`**/${CONFIG_PATHS.MODULE_DESCRIPTOR}`] = true;
+		if (moduleType === 'basic') {
+			settings['files.exclude'][`**/${CONFIG_PATHS.POM_XML}`] = true;
+		}
+
+		await vscode.workspace.fs.writeFile(settingsUri, Buffer.from(JSON.stringify(settings, null, 2)));
+	} catch (error) {
+		console.error('Could not update VSCode settings:', error);
+	}
 }

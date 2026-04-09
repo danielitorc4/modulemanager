@@ -1,6 +1,6 @@
 export const CONFIG_PATHS = {
-    TSCONFIG: 'tsconfig.json',
-    JSCONFIG: 'jsconfig.json',
+    POM_XML: 'pom.xml',
+    BUILD_GRADLE: 'build.gradle',
     MODULE_DESCRIPTOR: '.module.json'
 } as const;
 

@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { syncWorkspaceModuleConfigs } from '../config/configManager';
+import { syncAllModules } from '../build/buildFileManager';
 import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescriptors';
 import { resolveWorkspaceFolder } from '../utils/utils';
 
@@ -86,7 +86,7 @@ export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<voi
 		await updateDescriptorDependencies(sourceModule.module.moduleUri, dependencies =>
 			Array.from(new Set([...dependencies, targetModule.module.moduleName]))
 		);
-		await syncWorkspaceModuleConfigs(workspaceFolder.uri);
+		await syncAllModules(workspaceFolder.uri);
 
 		vscode.window.showInformationMessage(
 			`Added dependency: "${sourceModule.module.moduleName}" now depends on "${targetModule.module.moduleName}".`
@@ -145,7 +145,7 @@ export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<
 		await updateDescriptorDependencies(selectedModule.module.moduleUri, dependencies =>
 			dependencies.filter(dependency => dependency !== dependencyToRemove.dependency)
 		);
-		await syncWorkspaceModuleConfigs(workspaceFolder.uri);
+		await syncAllModules(workspaceFolder.uri);
 
 		vscode.window.showInformationMessage(
 			`Removed dependency: "${selectedModule.module.moduleName}" no longer depends on "${dependencyToRemove.dependency}".`
@@ -259,7 +259,7 @@ export async function validateModuleDependencies(resourceUri?: vscode.Uri): Prom
 		await updateDescriptorDependencies(sourceModule.moduleUri, dependencies =>
 			Array.from(new Set([...dependencies, selected.item.targetModule]))
 		);
-		await syncWorkspaceModuleConfigs(workspaceFolder.uri);
+		await syncAllModules(workspaceFolder.uri);
 
 		vscode.window.showInformationMessage(
 			`Added dependency: "${selected.item.sourceModule}" now depends on "${selected.item.targetModule}".`
