@@ -6,3 +6,4 @@ node_modules
 *.vsix
 copilot-instructions.md
 CHANGELOG.md
+Agent.md

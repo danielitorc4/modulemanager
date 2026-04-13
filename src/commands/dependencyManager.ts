@@ -21,6 +21,20 @@ interface MissingDependency {
 	importName: string;
 }
 
+export interface DependencyViolation {
+	fileUri: vscode.Uri;
+	importName: string;
+	sourceModule: string;
+	sourceModulePath: string;
+	targetModule: string;
+	range: vscode.Range;
+}
+
+interface JavaImportMatch {
+	importName: string;
+	range: vscode.Range;
+}
+
 /**
  * Adds a dependency from one module to another.
  */
@@ -271,6 +285,54 @@ export async function validateModuleDependencies(resourceUri?: vscode.Uri): Prom
 	}
 }
 
+export async function collectJavaDependencyViolations(workspaceUri: vscode.Uri): Promise<DependencyViolation[]> {
+	const modules = await getAllModules(workspaceUri);
+	if (modules.length < 2) {
+		return [];
+	}
+
+	const moduleByName = new Map<string, ModuleDependency>();
+	for (const module of modules) {
+		moduleByName.set(module.moduleName, module);
+	}
+
+	const violations: DependencyViolation[] = [];
+
+	for (const sourceModule of modules) {
+		const sourceRootUri = vscode.Uri.file(path.join(workspaceUri.fsPath, sourceModule.modulePath));
+		const pattern = new vscode.RelativePattern(sourceRootUri, 'src/**/*.java');
+		const files = await vscode.workspace.findFiles(pattern);
+
+		for (const file of files) {
+			const content = Buffer.from(await vscode.workspace.fs.readFile(file)).toString();
+			const imports = extractJavaImportMatches(content);
+
+			for (const importMatch of imports) {
+				const targetModuleName = extractJavaModuleName(importMatch.importName, moduleByName);
+				if (!targetModuleName || targetModuleName === sourceModule.moduleName) {
+					continue;
+				}
+
+				const targetModule = moduleByName.get(targetModuleName);
+				if (!targetModule || sourceModule.dependencies.includes(targetModuleName)) {
+					continue;
+				}
+
+				violations.push({
+					fileUri: file,
+					importName: importMatch.importName,
+					sourceModule: sourceModule.moduleName,
+					sourceModulePath: sourceModule.modulePath,
+					targetModule: targetModule.moduleName,
+					range: importMatch.range
+				});
+			}
+		}
+	}
+
+	return violations;
+}
+
 async function getAllModules(workspaceUri: vscode.Uri): Promise<ModuleDependency[]> {
 	const discoveredModules = await findModuleDescriptors(workspaceUri);
 	return discoveredModules.map(module => ({
@@ -455,6 +517,47 @@ export function extractJavaImportSpecifiers(source: string): string[] {
 	}
 
 	return Array.from(specifiers);
+}
+
+function extractJavaImportMatches(source: string): JavaImportMatch[] {
+	const matches: JavaImportMatch[] = [];
+	let match: RegExpExecArray | null;
+
+	REGEX.JAVA_IMPORT.lastIndex = 0;
+	while ((match = REGEX.JAVA_IMPORT.exec(source)) !== null) {
+		const importName = match[1]?.trim();
+		if (!importName) {
+			continue;
+		}
+
+		if (importName.startsWith('java.') || importName.startsWith('javax.')) {
+			continue;
+		}
+
+		const matchText = match[0] ?? '';
+		const nameIndexWithinMatch = matchText.indexOf(importName);
+		if (nameIndexWithinMatch < 0) {
+			continue;
+		}
+
+		const startOffset = match.index + nameIndexWithinMatch;
+		const endOffset = startOffset + importName.length;
+		matches.push({
+			importName,
+			range: new vscode.Range(offsetToPosition(source, startOffset), offsetToPosition(source, endOffset))
+		});
+	}
+
+	return matches;
+}
+
+function offsetToPosition(source: string, offset: number): vscode.Position {
+	const safeOffset = Math.max(0, Math.min(offset, source.length));
+	const precedingText = source.slice(0, safeOffset);
+	const lines = precedingText.split(/\r?\n/);
+	const line = Math.max(0, lines.length - 1);
+	const character = lines[lines.length - 1]?.length ?? 0;
+	return new vscode.Position(line, character);
 }
 
 export function extractJavaModuleName(

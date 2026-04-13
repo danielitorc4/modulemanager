@@ -69,7 +69,7 @@ async function writeClasspathFile(
     const { module } = context;
     const classpathUri = vscode.Uri.joinPath(module.moduleUri, CONFIG_PATHS.ECLIPSE_CLASSPATH);
 
-    const dependencyEntries = resolveDependencyEntries(workspaceUri, module, allModules).map(entry =>
+    const dependencyEntries = resolveDependencyEntries(context, module, allModules).map(entry =>
         `  <classpathentry kind="src" path="${escapeXml(entry)}" combineaccessrules="false"/>`
     );
 
@@ -90,7 +90,7 @@ async function writeClasspathFile(
 }
 
 function resolveDependencyEntries(
-    workspaceUri: vscode.Uri,
+    context: ModuleWorkspaceContext,
     module: DiscoveredModule,
     allModules: DiscoveredModule[]
 ): string[] {
@@ -99,26 +99,11 @@ function resolveDependencyEntries(
     const entries = module.descriptor.dependencies
         .map(dependencyName => moduleByName.get(dependencyName))
         .filter((dependency): dependency is DiscoveredModule => Boolean(dependency))
-        .map(dependency => {
-            const relativeModulePath = path.relative(module.moduleUri.fsPath, dependency.moduleUri.fsPath).replace(/\\/g, '/');
-            const normalizedRelativePath = normalizeRelPath(relativeModulePath);
-            return `${normalizedRelativePath}/src/main/java`;
-        });
+        .map(dependency => context.projectNameByModule.get(dependency.descriptor.name))
+        .filter((projectName): projectName is string => Boolean(projectName))
+        .map(projectName => `/${projectName}`);
 
     return Array.from(new Set(entries)).sort();
-}
-
-function normalizeRelPath(inputPath: string): string {
-    const normalized = inputPath.replace(/\\/g, '/').replace(/\/+/g, '/');
-    if (!normalized || normalized === '.') {
-        return '.';
-    }
-
-    if (normalized.startsWith('./') || normalized.startsWith('../')) {
-        return normalized;
-    }
-
-    return `./${normalized}`;
 }
 
 function getProjectName(workspaceUri: vscode.Uri, module: DiscoveredModule): string {

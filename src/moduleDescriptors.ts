@@ -4,6 +4,7 @@ import { CONFIG_PATHS, REGEX } from './constants';
 import { DiscoveredModule, ModuleConfig, ModuleType } from './types';
 
 const ALLOWED_DESCRIPTOR_FIELDS = new Set(['name', 'type', 'createdAt', 'dependencies']);
+const IGNORED_DESCRIPTOR_DIRECTORIES = new Set(['node_modules', 'bin', 'target', 'out']);
 
 export async function findModuleDescriptors(workspaceUri: vscode.Uri): Promise<DiscoveredModule[]> {
     const descriptorPattern = new vscode.RelativePattern(workspaceUri, `**/${CONFIG_PATHS.MODULE_DESCRIPTOR}`);
@@ -13,7 +14,7 @@ export async function findModuleDescriptors(workspaceUri: vscode.Uri): Promise<D
     const seenNames = new Set<string>();
 
     for (const descriptorUri of descriptorUris) {
-        if (isInsideNodeModules(descriptorUri.fsPath)) {
+        if (shouldIgnoreModuleDescriptorPath(descriptorUri.fsPath)) {
             continue;
         }
 
@@ -116,7 +117,8 @@ export function normalizeModuleDescriptor(parsed: any, fallbackModuleName?: stri
     };
 }
 
-function isInsideNodeModules(fsPath: string): boolean {
+export function shouldIgnoreModuleDescriptorPath(fsPath: string): boolean {
     const normalizedPath = fsPath.replace(/\\/g, '/').toLowerCase();
-    return normalizedPath.includes('/node_modules/');
+    const segments = normalizedPath.split('/');
+    return segments.some(segment => IGNORED_DESCRIPTOR_DIRECTORIES.has(segment));
 }

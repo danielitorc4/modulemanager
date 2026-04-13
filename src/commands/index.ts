@@ -2,4 +2,6 @@
 
 export { createModule, isModule, getRegisteredModules } from './createModule';
 export { addModuleDependency, removeModuleDependency, showModuleDependencies, validateModuleDependencies } from './dependencyManager';
+export { collectJavaDependencyViolations } from './dependencyManager';
+export type { DependencyViolation } from './dependencyManager';
 
