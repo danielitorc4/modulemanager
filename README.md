@@ -1,60 +1,51 @@
 # ModuleManager
 
-ModuleManager is a Visual Studio Code extension that brings IntelliJ-style Java module isolation to VSCode.
+ModuleManager is a VS Code extension for organizing Java code into independent modules with explicit dependencies.
 
-## What this extension does
+## Overview
 
-- Uses .module.json as the only source of truth.
-- Generates Eclipse metadata per module:
-  - .project
-  - .classpath
-- Enforces explicit module dependencies at the editor classpath level.
-- Supports three Java module flavors:
-  - basic: extension-managed Eclipse metadata only
-  - maven: user-managed pom.xml, extension-managed dependency block
-  - gradle: user-managed build.gradle, extension-managed dependency block
+- Creates Java modules with a predictable structure.
+- Stores module definitions in `.module.json`.
+- Keeps modules isolated unless a dependency is explicitly declared.
+- Syncs build metadata (`.project`, `.classpath`) from module descriptors.
 
-## Descriptor schema policy
+## Quick Start
 
-This version uses a strict descriptor schema.
+1. Open a workspace folder in VS Code.
+2. In Explorer, run **Create Module**.
+3. Choose a name and module type (`basic`, `maven`, or `gradle`).
+4. Add dependencies only when needed.
 
-Only these fields are supported in .module.json:
-- name
-- type
-- createdAt
-- dependencies
+Each module gets its own `.module.json`, and metadata is synchronized automatically.
 
-Any other fields make the descriptor invalid and it will be ignored until corrected.
+## Module Structure
 
-## Descriptor format
+```text
+ModuleName/
+  .module.json
+  .project
+  .classpath
+  src/main/java/
+  src/main/resources/
+  src/test/java/
+  README.md
+```
 
-Each module root must contain .module.json:
+## Dependency Model
+
+- No declared dependency: cross-module imports are treated as violations.
+- Declared dependency: imports are allowed.
+- Circular dependencies are blocked when adding dependencies.
+
+Example descriptor:
 
 ```json
 {
   "name": "orders",
   "type": "basic",
-  "createdAt": "2026-04-09T12:00:00.000Z",
+  "createdAt": "2026-04-13T12:00:00.000Z",
   "dependencies": ["billing"]
 }
-```
-
-Rules:
-- name: letters, numbers, hyphen, underscore
-- type: basic | maven | gradle
-- dependencies: module names declared in this workspace
-
-## Module structure
-
-Created modules use Java layout:
-
-```text
-module-name/
-  .module.json
-  src/main/java
-  src/main/resources
-  src/test/java
-  README.md
 ```
 
 ## Commands
@@ -65,17 +56,7 @@ module-name/
 - Show Module Dependencies
 - Validate Module Dependencies
 
-Validation scans Java imports under src/**/*.java and offers one-click dependency fixes.
-
-## Metadata sync behavior
-
-On module create/update/delete, the extension synchronizes all modules and updates:
-- .project (project metadata and project references)
-- .classpath (source folders and declared module dependency entries)
-- pom.xml dependencies block for maven modules (if pom.xml exists)
-- build.gradle dependencies block for gradle modules (if build.gradle exists)
-
-After sync, the extension triggers java.reloadProjects (with java.cleanWorkspace fallback).
+Validation scans Java imports and can guide/fix missing dependency declarations.
 
 ## Development
 
@@ -86,8 +67,10 @@ npm run compile-tests
 npm test
 ```
 
-## Notes
+## License
 
-- files.exclude only affects Explorer visibility; it does not change jdt.ls behavior.
-- Isolation depends on generated metadata and declared dependencies, not hidden files.
-- Java reload commands are executed only when provided by the Java extension; without JDK/Red Hat Java activation they are skipped.
+[MIT License](.github/MIT%20License.txt)
+
+## Author
+
+[Danielitorc4]
