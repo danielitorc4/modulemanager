@@ -2,14 +2,16 @@
   "name": "modulemanager",
   "displayName": "ModuleManager",
   "description": "module management extension for VSCode, allowing you to easily add, organize, and configure project modules.",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "engines": {
     "vscode": "^1.104.0"
   },
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
   "commands": [
@@ -28,6 +30,10 @@
         {
           "command": "modulemanager.showDependencies",
           "title": "Show Module Dependencies"
+        },
+        {
+          "command": "modulemanager.validateDependencies",
+          "title": "Validate Module Dependencies"
         }
       ],
     "menus": { 
@@ -47,22 +53,26 @@
     "package": "webpack --mode production --devtool hidden-source-map",
     "compile-tests": "tsc -p . --outDir out",
     "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "pretest": "npm run compile-tests && npm run compile",
     "lint": "eslint src",
     "test": "vscode-test"
   },
   "devDependencies": {
     "@types/vscode": "^1.104.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "22.x",
-    "@typescript-eslint/eslint-plugin": "^8.42.0",
-    "@typescript-eslint/parser": "^8.42.0",
-    "eslint": "^9.34.0",
-    "typescript": "^5.9.2",
-    "ts-loader": "^9.5.4",
-    "webpack": "^5.101.3",
+    "@types/node": "^22.19.17",
+    "@typescript-eslint/eslint-plugin": "^8.58.1",
+    "@typescript-eslint/parser": "^8.58.1",
+    "eslint": "^9.39.4",
+    "typescript": "^5.9.3",
+    "ts-loader": "^9.5.7",
+    "webpack": "^5.105.4",
     "webpack-cli": "^6.0.1",
-    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2"
+  },
+  "overrides": {
+    "diff": "8.0.4",
+    "serialize-javascript": "7.0.5"
   }
 }

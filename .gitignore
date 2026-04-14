@@ -5,3 +5,5 @@ node_modules
 .github
 *.vsix
 copilot-instructions.md
+CHANGELOG.md
+Agent.md
