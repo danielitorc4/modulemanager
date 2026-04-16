@@ -7,7 +7,10 @@ ModuleManager is a VS Code extension for organizing Java code into independent m
 - Creates Java modules with a predictable structure.
 - Stores module definitions in `.module.json`.
 - Keeps modules isolated unless a dependency is explicitly declared.
-- Syncs build metadata (`.project`, `.classpath`) from module descriptors.
+- Syncs Eclipse metadata (`.project`, `.classpath`) from module descriptors.
+- For Maven/Gradle modules, only syncs the marked `modulemanager:managed-dependencies` section in `pom.xml`/`build.gradle`, preserving manual dependencies outside that section.
+- Runs a Maven precheck when creating Maven modules (checks `pom.xml` location and Maven availability via `mvnw`, `maven.executable.path`, or `mvn` in PATH).
+- Updates workspace Java settings so Maven import/build sync stays enabled and simple Java projects can reference local `lib/**/*.jar` dependencies.
 
 ## Quick Start
 
@@ -57,6 +60,17 @@ Example descriptor:
 - Validate Module Dependencies
 
 Validation scans Java imports and can guide/fix missing dependency declarations.
+
+## Maven-first Workflow
+
+For modules with `pom.xml`, compile and run with Maven so classpath resolution comes from Maven dependencies instead of a plain `bin` classpath.
+
+Example:
+
+```bash
+mvn -f pom.xml clean compile
+mvn -f pom.xml test
+```
 
 ## Development
 

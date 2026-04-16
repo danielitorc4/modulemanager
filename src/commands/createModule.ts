@@ -6,6 +6,7 @@ import { CONFIG_PATHS, REGEX } from '../constants';
 import { syncAllModules } from '../build/buildFileManager';
 import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescriptors';
 import { pomTemplate, buildGradleTemplate } from '../build/templates';
+import { precheckMavenModule } from '../build/mavenPrecheck';
 
 export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
 	const workspaceFolder = resourceUri
@@ -60,6 +61,10 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
 
 	try {
 		await createModuleStructure(moduleUri, moduleType.value as ModuleConfig['type']);
+		if (moduleType.value === 'maven') {
+			await runMavenPrecheck(moduleUri, workspaceFolder.uri);
+		}
+
 		const descriptor: ModuleConfig = {
 			name: moduleName,
 			type: moduleType.value as ModuleConfig['type'],
@@ -86,44 +91,43 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
 }
 
 async function createModuleStructure(moduleUri: vscode.Uri, type: ModuleConfig['type']): Promise<void> {
+	// helper to create standard Java source/resource/test directories
+	async function createJavaDirs(targetUri: vscode.Uri): Promise<void> {
+		const dirs = ['src/main/java', 'src/main/resources', 'src/test/java'];
+		for (const dir of dirs) {
+			const dirUri = vscode.Uri.joinPath(targetUri, dir);
+			await vscode.workspace.fs.createDirectory(dirUri);
+		}
+	}
 
-    // helper to create standard Java source/resource/test directories
-    async function createJavaDirs(targetUri: vscode.Uri): Promise<void> {
-        const dirs = ['src/main/java', 'src/main/resources', 'src/test/java'];
-        for (const dir of dirs) {
-            const dirUri = vscode.Uri.joinPath(targetUri, dir);
-            await vscode.workspace.fs.createDirectory(dirUri);
-        }
-    }
+	switch (type) {
+		case 'basic': {
+			await createJavaDirs(moduleUri);
+			break;
+		}
+		case 'maven': {
+			await createJavaDirs(moduleUri);
 
-    switch (type) {
-        case 'basic': {
-            await createJavaDirs(moduleUri);
-            break;
-        }
-        case 'maven': {
-            await createJavaDirs(moduleUri);
+			const artifactId = path.basename(moduleUri.fsPath);
+			const pom = pomTemplate(artifactId);
+			const pomUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.POM_XML);
+			await vscode.workspace.fs.writeFile(pomUri, Buffer.from(pom));
+			break;
+		}
+		case 'gradle': {
+			await createJavaDirs(moduleUri);
 
-            const artifactId = path.basename(moduleUri.fsPath);
-            const pom = pomTemplate(artifactId);
-            const pomUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.POM_XML);
-            await vscode.workspace.fs.writeFile(pomUri, Buffer.from(pom));
-            break;
-        }
-        case 'gradle': {
-            await createJavaDirs(moduleUri);
-
-            const buildGradle = buildGradleTemplate();
-            const gradleUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.BUILD_GRADLE);
-            await vscode.workspace.fs.writeFile(gradleUri, Buffer.from(buildGradle));
-            break;
-        }
-    }
+			const buildGradle = buildGradleTemplate();
+			const gradleUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.BUILD_GRADLE);
+			await vscode.workspace.fs.writeFile(gradleUri, Buffer.from(buildGradle));
+			break;
+		}
+	}
 
 	const readmeUri = vscode.Uri.joinPath(moduleUri, 'README.md');
 	await vscode.workspace.fs.writeFile(
 		readmeUri,
-		Buffer.from(`# ${path.basename(moduleUri.fsPath)}\n\nModule created on ${new Date().toLocaleString()}\n`)
+		Buffer.from(buildModuleReadme(path.basename(moduleUri.fsPath), type))
 	);
 }
 
@@ -177,25 +181,93 @@ async function updateVSCodeSettings(workspaceUri: vscode.Uri): Promise<void> {
 	try {
 		await vscode.workspace.fs.createDirectory(vscodeDir);
 
-		let settings: any = {};
+		let settings: Record<string, unknown> = {};
 		try {
 			const settingsData = await vscode.workspace.fs.readFile(settingsUri);
 			const settingsText = Buffer.from(settingsData).toString();
-			settings = JSON.parse(settingsText.replace(REGEX.JSON_COMMENTS, ''));
+			const parsed = JSON.parse(settingsText.replace(REGEX.JSON_COMMENTS, ''));
+			if (isRecord(parsed)) {
+				settings = parsed;
+			}
 		} catch {
 			// Initialize empty settings if file doesn't exist or has invalid JSON.
 		}
 
-		if (!settings['files.exclude']) {
-			settings['files.exclude'] = {};
-		}
+		const filesExclude = asRecord(settings['files.exclude']);
+		filesExclude[`**/${CONFIG_PATHS.MODULE_DESCRIPTOR}`] = true;
+		filesExclude[`**/${CONFIG_PATHS.ECLIPSE_PROJECT}`] = true;
+		filesExclude[`**/${CONFIG_PATHS.ECLIPSE_CLASSPATH}`] = true;
+		settings['files.exclude'] = filesExclude;
 
-		settings['files.exclude'][`**/${CONFIG_PATHS.MODULE_DESCRIPTOR}`] = true;
-		settings['files.exclude'][`**/${CONFIG_PATHS.ECLIPSE_PROJECT}`] = true;
-		settings['files.exclude'][`**/${CONFIG_PATHS.ECLIPSE_CLASSPATH}`] = true;
+		// Keep Java tooling aligned with Maven projects so editor classpath stays in sync.
+		settings['java.import.maven.enabled'] = true;
+		settings['java.configuration.updateBuildConfiguration'] = 'automatic';
+		settings['maven.executable.preferMavenWrapper'] = true;
+		settings['java.project.referencedLibraries'] = mergeReferencedLibrariesSetting(
+			settings['java.project.referencedLibraries']
+		);
 
 		await vscode.workspace.fs.writeFile(settingsUri, Buffer.from(JSON.stringify(settings, null, 2)));
 	} catch (error) {
 		console.error('Could not update VSCode settings:', error);
 	}
+}
+
+async function runMavenPrecheck(moduleUri: vscode.Uri, workspaceUri: vscode.Uri): Promise<void> {
+	const precheck = await precheckMavenModule(moduleUri, workspaceUri);
+	if (!precheck.ok) {
+		vscode.window.showWarningMessage(precheck.failure.message);
+	}
+}
+
+function buildModuleReadme(moduleName: string, type: ModuleConfig['type']): string {
+	const base = `# ${moduleName}\n\nModule created on ${new Date().toLocaleString()}\n`;
+
+	if (type !== 'maven') {
+		return base;
+	}
+
+	return [
+		base.trimEnd(),
+		'',
+		'## Maven-first build guidance',
+		'Run compile/test from Maven so classpath resolution comes from pom.xml, not only from bin.',
+		'',
+		'```bash',
+		'mvn -f pom.xml clean compile',
+		'mvn -f pom.xml test',
+		'```',
+		''
+	].join('\n');
+}
+
+function mergeReferencedLibrariesSetting(currentValue: unknown): unknown {
+	const requiredPatterns = ['lib/**/*.jar', '**/lib/**/*.jar', '**/target/dependency/*.jar'];
+
+	if (Array.isArray(currentValue)) {
+		const existing = currentValue.filter((entry): entry is string => typeof entry === 'string');
+		return Array.from(new Set([...existing, ...requiredPatterns]));
+	}
+
+	if (isRecord(currentValue)) {
+		const includeValue = currentValue.include;
+		const include = Array.isArray(includeValue)
+			? includeValue.filter((entry): entry is string => typeof entry === 'string')
+			: [];
+
+		return {
+			...currentValue,
+			include: Array.from(new Set([...include, ...requiredPatterns]))
+		};
+	}
+
+	return requiredPatterns;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+	return isRecord(value) ? value : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

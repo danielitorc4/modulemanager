@@ -3,6 +3,10 @@ import { CONFIG_PATHS } from '../constants';
 import { DiscoveredModule } from '../types';
 
 const MODULE_GROUP_ID = 'com.modules';
+const MANAGED_SECTION_START = '<!-- modulemanager:managed-dependencies:start -->';
+const MANAGED_SECTION_END = '<!-- modulemanager:managed-dependencies:end -->';
+const MANAGED_SECTION_REGEX = /(^[ \t]*)<!--\s*modulemanager:managed-dependencies:start\s*-->[\s\S]*?^[ \t]*<!--\s*modulemanager:managed-dependencies:end\s*-->/m;
+const MANAGED_SECTION_DELETION_WARNING = '<!-- WARNING: Do not delete or modify the markers around this section. -->';
 
 export async function syncModuleDependencies(
     moduleUri: vscode.Uri,
@@ -15,32 +19,41 @@ export async function syncModuleDependencies(
     const moduleNames = new Set(allModules.map(module => module.descriptor.name));
     const dependencies = Array.from(new Set(dependencyNames)).filter(name => moduleNames.has(name));
 
-    const dependencyBlock = dependencies
-        .map(name => [
-            '    <dependency>',
-            `      <groupId>${MODULE_GROUP_ID}</groupId>`,
-            `      <artifactId>${name}</artifactId>`,
-            '      <version>1.0.0</version>',
-            '    </dependency>'
-        ].join('\n'))
-        .join('\n');
+    const managedSectionMatch = pomContent.match(MANAGED_SECTION_REGEX);
+    if (!managedSectionMatch) {
+        console.warn(
+            `Managed dependency section markers not found in ${pomUri.fsPath}. ` +
+            'Skipping pom.xml dependency synchronization.'
+        );
+        return;
+    }
 
-    const managedDependencies = [
-        '  <dependencies>',
-        dependencyBlock || '    <!-- managed by ModuleManager -->',
-        '  </dependencies>'
-    ].join('\n');
+    const indentation = managedSectionMatch[1] ?? '';
+    const managedSection = buildManagedSection(dependencies, indentation);
 
-    const dependenciesRegex = /<dependencies>[\s\S]*?<\/dependencies>/;
-    let updatedContent: string;
-
-    if (dependenciesRegex.test(pomContent)) {
-        updatedContent = pomContent.replace(dependenciesRegex, managedDependencies);
-    } else if (pomContent.includes('</project>')) {
-        updatedContent = pomContent.replace('</project>', `${managedDependencies}\n</project>`);
-    } else {
-        updatedContent = `${pomContent.trimEnd()}\n${managedDependencies}\n`;
+    const updatedContent = pomContent.replace(MANAGED_SECTION_REGEX, managedSection);
+    if (updatedContent === pomContent) {
+        return;
     }
 
     await vscode.workspace.fs.writeFile(pomUri, Buffer.from(updatedContent));
+}
+
+function buildManagedSection(dependencies: string[], indentation: string): string {
+    const dependencyBlock = dependencies
+        .map(name => [
+            `${indentation}<dependency>`,
+            `${indentation}  <groupId>${MODULE_GROUP_ID}</groupId>`,
+            `${indentation}  <artifactId>${name}</artifactId>`,
+            `${indentation}  <version>1.0.0</version>`,
+            `${indentation}</dependency>`
+        ].join('\n'))
+        .join('\n');
+
+    return [
+        `${indentation}${MANAGED_SECTION_START}`,
+        `${indentation}${MANAGED_SECTION_DELETION_WARNING}`,
+        dependencyBlock || `${indentation}<!-- no modulemanager dependencies -->`,
+        `${indentation}${MANAGED_SECTION_END}`
+    ].join('\n');
 }
