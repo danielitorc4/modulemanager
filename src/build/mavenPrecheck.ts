@@ -154,11 +154,12 @@ function stripWrappingQuotes(value: string): string {
 
 async function canExecuteMaven(command: string, cwd?: string): Promise<boolean> {
 	return new Promise(resolve => {
+		const useShell = shouldUseShellForMavenCheck(command);
 		execFile(
 			command,
 			MAVEN_VERSION_ARGS,
-			{ cwd, windowsHide: true, timeout: MAVEN_VERSION_TIMEOUT_MS },
-			error => {
+			{ cwd, windowsHide: true, timeout: MAVEN_VERSION_TIMEOUT_MS, shell: useShell },
+			(error, _stdout, stderr) => {
 				if (!error) {
 					resolve(true);
 					return;
@@ -170,10 +171,34 @@ async function canExecuteMaven(command: string, cwd?: string): Promise<boolean> 
 					return;
 				}
 
+				if (process.platform === 'win32' && isWindowsCommandNotFound(stderr)) {
+					resolve(false);
+					return;
+				}
+
 				resolve(true);
 			}
 		);
 	});
+}
+
+function shouldUseShellForMavenCheck(command: string): boolean {
+	if (process.platform !== 'win32') {
+		return false;
+	}
+
+	const normalized = command.toLowerCase();
+	if (normalized.endsWith('.cmd') || normalized.endsWith('.bat')) {
+		return true;
+	}
+
+	const baseName = path.basename(normalized);
+	return baseName === 'mvn' || baseName === 'mvnw';
+}
+
+function isWindowsCommandNotFound(stderr: string | Buffer): boolean {
+	const stderrText = Buffer.isBuffer(stderr) ? stderr.toString() : stderr;
+	return /is not recognized as an internal or external command/i.test(stderrText);
 }
 
 async function fileExists(uri: vscode.Uri): Promise<boolean> {

@@ -104,5 +104,83 @@ export async function resolveWorkspaceFolder(resourceUri?: vscode.Uri): Promise<
     return selected?.folder ?? null;
 }
 
+export function stripJsonComments(input: string): string {
+    let output = '';
+    let inString = false;
+    let inLineComment = false;
+    let inBlockComment = false;
+    let escaped = false;
+
+    for (let index = 0; index < input.length; index++) {
+        const char = input[index];
+        const nextChar = input[index + 1];
+
+        if (inLineComment) {
+            if (char === '\n' || char === '\r') {
+                inLineComment = false;
+                output += char;
+            }
+            continue;
+        }
+
+        if (inBlockComment) {
+            if (char === '*' && nextChar === '/') {
+                inBlockComment = false;
+                index++;
+                continue;
+            }
+
+            if (char === '\n' || char === '\r') {
+                output += char;
+            }
+            continue;
+        }
+
+        if (inString) {
+            output += char;
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (char === '\\') {
+                escaped = true;
+                continue;
+            }
+
+            if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            output += char;
+            continue;
+        }
+
+        if (char === '/' && nextChar === '/') {
+            inLineComment = true;
+            index++;
+            continue;
+        }
+
+        if (char === '/' && nextChar === '*') {
+            inBlockComment = true;
+            index++;
+            continue;
+        }
+
+        output += char;
+    }
+
+    return output;
+}
+
+export function parseJsonWithComments<T = unknown>(input: string): T {
+    return JSON.parse(stripJsonComments(input)) as T;
+}
+
 
 

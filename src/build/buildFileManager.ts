@@ -11,11 +11,12 @@ export async function syncAllModules(workspaceUri: vscode.Uri): Promise<void> {
     for (const module of modules) {
         const { descriptor, moduleUri } = module;
 
-        await eclipseMetadataManager.syncModuleMetadata(workspaceUri, module, modules);
-
         if (descriptor.type === 'basic') {
+            await eclipseMetadataManager.syncModuleMetadata(workspaceUri, module, modules);
             continue;
         }
+
+        await removeEclipseMetadata(moduleUri);
 
         if (descriptor.type === 'maven') {
             const pomUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.POM_XML);
@@ -28,6 +29,21 @@ export async function syncAllModules(workspaceUri: vscode.Uri): Promise<void> {
         const gradleUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.BUILD_GRADLE);
         if (await fileExists(gradleUri)) {
             await gradleManager.syncModuleDependencies(moduleUri, descriptor.dependencies, modules);
+        }
+    }
+}
+
+async function removeEclipseMetadata(moduleUri: vscode.Uri): Promise<void> {
+    const eclipseMetadataUris = [
+        vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.ECLIPSE_PROJECT),
+        vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.ECLIPSE_CLASSPATH)
+    ];
+
+    for (const metadataUri of eclipseMetadataUris) {
+        try {
+            await vscode.workspace.fs.delete(metadataUri, { recursive: false, useTrash: false });
+        } catch {
+            // Ignore missing files to keep sync idempotent.
         }
     }
 }

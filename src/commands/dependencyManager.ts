@@ -417,6 +417,7 @@ function detectAllCircularDependencies(modules: ModuleDependency[]): string[][] 
 	}
 
 	const cycles: string[][] = [];
+	const seenCycles = new Set<string>();
 	const visited = new Set<string>();
 	const stack = new Set<string>();
 
@@ -432,7 +433,13 @@ function detectAllCircularDependencies(modules: ModuleDependency[]): string[][] 
 			} else if (stack.has(dependency)) {
 				const cycleStart = traversalPath.indexOf(dependency);
 				if (cycleStart !== -1) {
-					cycles.push([...traversalPath.slice(cycleStart), dependency]);
+					const rawCycle = [...traversalPath.slice(cycleStart), dependency];
+					const normalizedCycle = normalizeCycle(rawCycle);
+					const cycleKey = normalizedCycle.join('->');
+					if (!seenCycles.has(cycleKey)) {
+						seenCycles.add(cycleKey);
+						cycles.push(normalizedCycle);
+					}
 				}
 			}
 		}
@@ -447,6 +454,28 @@ function detectAllCircularDependencies(modules: ModuleDependency[]): string[][] 
 	}
 
 	return cycles;
+}
+
+function normalizeCycle(cycle: string[]): string[] {
+	if (cycle.length <= 1) {
+		return cycle;
+	}
+
+	const closedCycle = cycle[0] === cycle[cycle.length - 1] ? [...cycle] : [...cycle, cycle[0]];
+	const uniqueNodes = closedCycle.slice(0, -1);
+	if (uniqueNodes.length === 0) {
+		return closedCycle;
+	}
+
+	const rotations: string[][] = [];
+	for (let index = 0; index < uniqueNodes.length; index++) {
+		const rotation = uniqueNodes.slice(index).concat(uniqueNodes.slice(0, index));
+		rotations.push(rotation);
+	}
+
+	rotations.sort((left, right) => left.join('->').localeCompare(right.join('->')));
+	const canonicalRotation = rotations[0];
+	return [...canonicalRotation, canonicalRotation[0]];
 }
 
 async function findMissingDependencies(
@@ -564,12 +593,26 @@ export function extractJavaModuleName(
 	importSpecifier: string,
 	moduleByName: Map<string, ModuleDependency>
 ): string | null {
+	let bestMatch: string | null = null;
+	let bestScore = -1;
+
 	for (const moduleName of moduleByName.keys()) {
-		const prefix = `${moduleName}.`;
-		if (importSpecifier === moduleName || importSpecifier.startsWith(prefix)) {
-			return moduleName;
+		const directPrefix = `${moduleName}.`;
+		const nestedSegment = `.${moduleName}.`;
+		const isDirectMatch = importSpecifier === moduleName || importSpecifier.startsWith(directPrefix);
+		const isNestedSegmentMatch =
+			importSpecifier.includes(nestedSegment) || importSpecifier.endsWith(`.${moduleName}`);
+
+		const score = isDirectMatch ? 2 : isNestedSegmentMatch ? 1 : 0;
+		if (score === 0) {
+			continue;
+		}
+
+		if (score > bestScore || (score === bestScore && (!bestMatch || moduleName.length > bestMatch.length))) {
+			bestMatch = moduleName;
+			bestScore = score;
 		}
 	}
 
-	return null;
+	return bestMatch;
 }
