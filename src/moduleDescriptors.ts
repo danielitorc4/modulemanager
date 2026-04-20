@@ -2,9 +2,11 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { CONFIG_PATHS, REGEX } from './constants';
 import { DiscoveredModule, ModuleConfig, ModuleType } from './types';
+import { parseJsonWithComments } from './utils/utils';
 
 const ALLOWED_DESCRIPTOR_FIELDS = new Set(['name', 'type', 'createdAt', 'dependencies']);
 const IGNORED_DESCRIPTOR_DIRECTORIES = new Set(['node_modules', 'bin', 'target', 'out']);
+const ISO_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export async function findModuleDescriptors(workspaceUri: vscode.Uri): Promise<DiscoveredModule[]> {
     const descriptorPattern = new vscode.RelativePattern(workspaceUri, `**/${CONFIG_PATHS.MODULE_DESCRIPTOR}`);
@@ -46,7 +48,7 @@ export async function readModuleDescriptor(
 ): Promise<ModuleConfig | null> {
     try {
         const content = await vscode.workspace.fs.readFile(descriptorUri);
-        const parsed = JSON.parse(Buffer.from(content).toString().replace(REGEX.JSON_COMMENTS, ''));
+        const parsed = parseJsonWithComments<unknown>(Buffer.from(content).toString());
         return normalizeModuleDescriptor(parsed, fallbackModuleName);
     } catch (error) {
         console.warn(
@@ -93,8 +95,7 @@ export function normalizeModuleDescriptor(parsed: any, fallbackModuleName?: stri
         throw new Error('Descriptor field "type" must be one of: basic, maven, gradle.');
     }
 
-    const createdAt =
-        typeof record.createdAt === 'string' && record.createdAt.trim() ? record.createdAt : new Date().toISOString();
+    const createdAt = normalizeCreatedAt(record.createdAt);
 
     if (record.dependencies !== undefined && !Array.isArray(record.dependencies)) {
         throw new Error('Descriptor field "dependencies" must be an array of module names.');
@@ -121,4 +122,22 @@ export function shouldIgnoreModuleDescriptorPath(fsPath: string): boolean {
     const normalizedPath = fsPath.replace(/\\/g, '/').toLowerCase();
     const segments = normalizedPath.split('/');
     return segments.some(segment => IGNORED_DESCRIPTOR_DIRECTORIES.has(segment));
+}
+
+function normalizeCreatedAt(value: unknown): string {
+    if (typeof value !== 'string') {
+        return new Date().toISOString();
+    }
+
+    const trimmedValue = value.trim();
+    if (!ISO_TIMESTAMP_REGEX.test(trimmedValue)) {
+        return new Date().toISOString();
+    }
+
+    const parsed = new Date(trimmedValue);
+    if (Number.isNaN(parsed.getTime())) {
+        return new Date().toISOString();
+    }
+
+    return parsed.toISOString();
 }

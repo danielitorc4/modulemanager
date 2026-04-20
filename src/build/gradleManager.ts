@@ -2,6 +2,10 @@ import * as vscode from 'vscode';
 import { CONFIG_PATHS } from '../constants';
 import { DiscoveredModule } from '../types';
 
+const MANAGED_SECTION_START = '    // modulemanager:managed-dependencies:start';
+const MANAGED_SECTION_END = '    // modulemanager:managed-dependencies:end';
+const MANAGED_SECTION_REGEX = /\/\/\s*modulemanager:managed-dependencies:start[\s\S]*?\/\/\s*modulemanager:managed-dependencies:end/;
+
 export async function syncModuleDependencies(
     moduleUri: vscode.Uri,
     dependencyNames: string[],
@@ -13,20 +17,28 @@ export async function syncModuleDependencies(
     const moduleNames = new Set(allModules.map(module => module.descriptor.name));
     const dependencies = Array.from(new Set(dependencyNames)).filter(name => moduleNames.has(name));
 
-    const dependencyBlock = dependencies
-        .map(name => `    implementation project(':${name}')`)
-        .join('\n');
+    const managedSection = buildManagedSection(dependencies);
+    if (!MANAGED_SECTION_REGEX.test(buildGradleContent)) {
+        vscode.window.showWarningMessage(
+            `Skipping dependency sync for ${gradleUri.fsPath}: managed dependency section markers were not found. ` +
+            `Expected markers: "${MANAGED_SECTION_START}" and "${MANAGED_SECTION_END}".`
+        );
+        return;
+    }
 
-    const managedDependencies = [
-        'dependencies {',
-        dependencyBlock || '    // managed by ModuleManager',
-        '}'
-    ].join('\n');
-
-    const dependenciesRegex = /dependencies\s*\{[\s\S]*?\}/;
-    const updatedContent = dependenciesRegex.test(buildGradleContent)
-        ? buildGradleContent.replace(dependenciesRegex, managedDependencies)
-        : `${buildGradleContent.trimEnd()}\n\n${managedDependencies}\n`;
+    const updatedContent = buildGradleContent.replace(MANAGED_SECTION_REGEX, managedSection);
+    if (updatedContent === buildGradleContent) {
+        return;
+    }
 
     await vscode.workspace.fs.writeFile(gradleUri, Buffer.from(updatedContent));
+}
+
+function buildManagedSection(dependencies: string[]): string {
+    const dependencyLines = dependencies.map(name => `    implementation project(':${name}')`);
+    return [
+        MANAGED_SECTION_START,
+        ...(dependencyLines.length > 0 ? dependencyLines : ['    // no modulemanager dependencies']),
+        MANAGED_SECTION_END
+    ].join('\n');
 }

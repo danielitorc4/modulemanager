@@ -12,7 +12,9 @@ export function pomTemplate(artifactId: string): string {
     <maven.compiler.release>17</maven.compiler.release>
   </properties>
   <dependencies>
-    <!-- managed by ModuleManager -->
+        <!-- modulemanager:managed-dependencies:start -->
+        <!-- no modulemanager dependencies -->
+        <!-- modulemanager:managed-dependencies:end -->
   </dependencies>
 </project>
 `;
@@ -34,7 +36,9 @@ repositories {
 }
 
 dependencies {
-    // managed by ModuleManager
+    // modulemanager:managed-dependencies:start
+    // no modulemanager dependencies
+    // modulemanager:managed-dependencies:end
 }
 `;
 }
