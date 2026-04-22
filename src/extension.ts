@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import {
 	createModule,
 	addModuleDependency,
@@ -17,7 +18,21 @@ const COMMANDS_CACHE_TTL_MS = 15_000;
 const JAVA_RELOAD_COMMAND = 'java.reloadProjects';
 const JAVA_CLEAN_COMMAND = 'java.cleanWorkspace';
 const DIAGNOSTIC_SOURCE = 'modulemanager';
-const BUILD_BLOCKER_RELATIVE_PATH = 'src/main/java/modulemanager/generated/ModuleManagerDependencyViolationBlocker.java';
+const LEGACY_BUILD_BLOCKER_RELATIVE_PATH = 'src/main/java/modulemanager/generated/ModuleManagerDependencyViolationBlocker.java';
+const BUILD_BLOCKER_CLASS_PREFIX = 'ModuleManagerDependencyViolationBlocker__';
+const BLOCKED_CLASSPATH_CONTENT = [
+'<?xml version="1.0" encoding="UTF-8"?>',
+'<classpath>',
+'  <classpathentry kind="src" path="src/main/java" excluding="**"/>',
+'  <classpathentry kind="src" path="src/test/java" excluding="**"/>',
+'  <classpathentry kind="src" path="src/main/resources" excluding="**"/>',
+'  <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>',
+'  <classpathentry kind="output" path="bin"/>',
+'</classpath>',
+''
+].join('\n');
+// Retry delays (ms) after activation to call java.reloadProjects once the Java LS has started.
+const STARTUP_RELOAD_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 let reloadTimer: NodeJS.Timeout | undefined;
 let diagnosticsTimer: NodeJS.Timeout | undefined;
 let dependencyDiagnosticsCollection: vscode.DiagnosticCollection | undefined;
@@ -147,9 +162,10 @@ async function refreshDependencyDiagnostics(): Promise<void> {
 		return;
 	}
 
-	const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
-	const diagnosticsByFile = new Map<string, vscode.Diagnostic[]>();
-	const violationsByWorkspace = new Map<string, DependencyViolation[]>();
+const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+const diagnosticsByFile = new Map<string, vscode.Diagnostic[]>();
+const violationsByWorkspace = new Map<string, DependencyViolation[]>();
+const usageRangeCache = new Map<string, vscode.Range[]>();
 
 	for (const workspaceFolder of workspaceFolders) {
 		const violations = await collectJavaDependencyViolations(workspaceFolder.uri);
@@ -163,12 +179,37 @@ async function refreshDependencyDiagnostics(): Promise<void> {
 			diagnostic.source = DIAGNOSTIC_SOURCE;
 			diagnostic.code = 'missing-module-dependency';
 
-			const key = violation.fileUri.toString();
-			const diagnostics = diagnosticsByFile.get(key) ?? [];
-			diagnostics.push(diagnostic);
-			diagnosticsByFile.set(key, diagnostics);
-		}
-	}
+const key = violation.fileUri.toString();
+const diagnostics = diagnosticsByFile.get(key) ?? [];
+diagnostics.push(diagnostic);
+
+const blockedTypeName = getSimpleTypeName(violation.importName);
+if (blockedTypeName) {
+const cacheKey = `${key}::${blockedTypeName}`;
+let usageRanges = usageRangeCache.get(cacheKey);
+if (!usageRanges) {
+usageRanges = await findTypeUsageRanges(violation.fileUri, blockedTypeName);
+usageRangeCache.set(cacheKey, usageRanges);
+}
+
+for (const usageRange of usageRanges) {
+if (usageRange.intersection(violation.range)) {
+continue;
+}
+
+const usageDiagnostic = new vscode.Diagnostic(
+usageRange,
+`Type "${blockedTypeName}" is blocked because module "${violation.sourceModule}" does not declare dependency on "${violation.targetModule}".`,
+vscode.DiagnosticSeverity.Error
+);
+usageDiagnostic.source = DIAGNOSTIC_SOURCE;
+usageDiagnostic.code = 'missing-module-dependency';
+diagnostics.push(usageDiagnostic);
+}
+}
+diagnosticsByFile.set(key, diagnostics);
+}
+}
 
 	dependencyDiagnosticsCollection.clear();
 	for (const [uriString, diagnostics] of diagnosticsByFile.entries()) {
@@ -190,46 +231,123 @@ async function syncCompileBlockers(workspaceUri: vscode.Uri, violations: Depende
 	const modules = await findModuleDescriptors(workspaceUri);
 	const blockedModulePaths = new Set(violations.map(violation => violation.sourceModulePath));
 
-	for (const module of modules) {
-		const blockerUri = vscode.Uri.joinPath(module.moduleUri, BUILD_BLOCKER_RELATIVE_PATH);
-		if (blockedModulePaths.has(module.modulePath)) {
-			const moduleViolations = violations.filter(violation => violation.sourceModulePath === module.modulePath);
-			await writeCompileBlockerFile(blockerUri, module.descriptor.name, moduleViolations);
-			continue;
-		}
-
-		await deleteFileIfExists(blockerUri);
-	}
+for (const module of modules) {
+const legacyBlockerUri = vscode.Uri.joinPath(module.moduleUri, LEGACY_BUILD_BLOCKER_RELATIVE_PATH);
+if (blockedModulePaths.has(module.modulePath)) {
+const moduleViolations = violations.filter(violation => violation.sourceModulePath === module.modulePath);
+await writeCompileBlockerFilesForModule(module.moduleUri, module.descriptor.name, moduleViolations);
+await deleteFileIfExists(legacyBlockerUri);
+// Secondary blocker: exclude all sources in the module's .classpath so the Java
+// compiler sees no files to compile, regardless of project-isolation state.
+if (module.descriptor.type === 'basic') {
+await writeBlockedClasspathFile(module.moduleUri);
+}
+continue;
 }
 
-async function writeCompileBlockerFile(
-	blockerUri: vscode.Uri,
-	moduleName: string,
-	violations: DependencyViolation[]
-): Promise<void> {
-	const uniqueDependencyPairs = Array.from(
-		new Set(violations.map(violation => `${violation.sourceModule} -> ${violation.targetModule}`))
-	).sort();
-	const violationSummary = uniqueDependencyPairs.map(pair => ` * - ${pair}`).join('\n');
-	const blockerSource = [
-		'package modulemanager.generated;',
-		'',
-		'/**',
-		` * Generated by ModuleManager. Module "${moduleName}" contains illegal cross-module imports.`,
-		' * Resolve these dependencies with the ModuleManager dependency command:',
-		violationSummary || ' * - Unknown violation',
-		' */',
-		'public final class ModuleManagerDependencyViolationBlocker {',
-		'    private ModuleManagerDependencyViolationBlocker() {}',
-		'',
-		'    // Intentional type mismatch so Java compilation fails while violations exist.',
-		'    private static final int MODULE_MANAGER_DEPENDENCY_ERRORS_PRESENT = "fix-module-dependencies";',
-		'}',
-		''
-	].join('\n');
+await deleteFileIfExists(legacyBlockerUri);
+await deleteGeneratedCompileBlockers(module.moduleUri);
+}
+}
 
-	await vscode.workspace.fs.createDirectory(parentDirectoryUri(blockerUri));
-	await vscode.workspace.fs.writeFile(blockerUri, Buffer.from(blockerSource));
+async function writeCompileBlockerFilesForModule(
+moduleUri: vscode.Uri,
+moduleName: string,
+violations: DependencyViolation[]
+): Promise<void> {
+const violationsBySourceFile = new Map<string, DependencyViolation[]>();
+for (const violation of violations) {
+const key = violation.fileUri.toString();
+const existing = violationsBySourceFile.get(key) ?? [];
+existing.push(violation);
+violationsBySourceFile.set(key, existing);
+}
+
+const expectedBlockerUris = new Set<string>();
+
+for (const [sourceFileUriString, sourceViolations] of violationsBySourceFile.entries()) {
+const sourceFileUri = vscode.Uri.parse(sourceFileUriString);
+const blocker = await createCompileBlockerForSourceFile(sourceFileUri, moduleName, sourceViolations);
+expectedBlockerUris.add(blocker.uri.toString());
+await vscode.workspace.fs.writeFile(blocker.uri, Buffer.from(blocker.source));
+}
+
+await deleteGeneratedCompileBlockers(moduleUri, expectedBlockerUris);
+}
+
+async function createCompileBlockerForSourceFile(
+sourceFileUri: vscode.Uri,
+moduleName: string,
+violations: DependencyViolation[]
+): Promise<{ uri: vscode.Uri; source: string }> {
+const sourceText = Buffer.from(await vscode.workspace.fs.readFile(sourceFileUri)).toString();
+const packageDeclaration = extractPackageDeclaration(sourceText);
+const sourceClassName = sanitizeJavaIdentifier(path.basename(sourceFileUri.fsPath, '.java'));
+const blockerClassName = `${BUILD_BLOCKER_CLASS_PREFIX}${sourceClassName}`;
+const blockerUri = vscode.Uri.joinPath(parentDirectoryUri(sourceFileUri), `${blockerClassName}.java`);
+
+const uniqueDependencyPairs = Array.from(
+new Set(violations.map(violation => `${violation.sourceModule} -> ${violation.targetModule}`))
+).sort();
+const violationSummary = uniqueDependencyPairs.map(pair => ` * - ${pair}`).join('\n');
+
+const packageLine = packageDeclaration ? [packageDeclaration, ''] : [];
+const blockerSource = [
+...packageLine,
+'/**',
+` * Generated by ModuleManager. Module "${moduleName}" contains illegal cross-module imports.`,
+' * Resolve these dependencies with the ModuleManager dependency command:',
+violationSummary || ' * - Unknown violation',
+' */',
+`public final class ${blockerClassName} {`,
+`    private ${blockerClassName}() {}`,
+'',
+'    // Intentional type mismatch so Java compilation fails while violations exist.',
+'    private static final int MODULE_MANAGER_DEPENDENCY_ERRORS_PRESENT = "fix-module-dependencies";',
+'}',
+''
+].join('\n');
+
+return { uri: blockerUri, source: blockerSource };
+}
+
+function extractPackageDeclaration(sourceText: string): string | null {
+const packageMatch = sourceText.match(/^\s*(package\s+[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*\s*;)\s*$/m);
+return packageMatch?.[1]?.trim() ?? null;
+}
+
+function sanitizeJavaIdentifier(value: string): string {
+const sanitized = value.replace(/[^A-Za-z0-9_$]/g, '_');
+if (/^[A-Za-z_$]/.test(sanitized)) {
+return sanitized;
+}
+
+return `M_${sanitized || 'Source'}`;
+}
+
+async function deleteGeneratedCompileBlockers(moduleUri: vscode.Uri, keepUris: Set<string> = new Set()): Promise<void> {
+const pattern = new vscode.RelativePattern(moduleUri, 'src/**/*.java');
+const javaFiles = await vscode.workspace.findFiles(pattern);
+
+for (const javaFile of javaFiles) {
+const baseName = path.basename(javaFile.fsPath, '.java');
+const isGeneratedBlocker = baseName.startsWith(BUILD_BLOCKER_CLASS_PREFIX) || baseName === 'ModuleManagerDependencyViolationBlocker';
+if (!isGeneratedBlocker || keepUris.has(javaFile.toString())) {
+continue;
+}
+
+await deleteFileIfExists(javaFile);
+}
+}
+
+/**
+ * Writes a .classpath that excludes all sources from the violating module so the Java compiler
+ * finds nothing to compile. This is a belt-and-suspenders complement to the compile-error file
+ * and is more reliable when project isolation is not yet fully enforced by the Java Language Server.
+ */
+async function writeBlockedClasspathFile(moduleUri: vscode.Uri): Promise<void> {
+const classpathUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.ECLIPSE_CLASSPATH);
+await vscode.workspace.fs.writeFile(classpathUri, Buffer.from(BLOCKED_CLASSPATH_CONTENT));
 }
 
 async function deleteFileIfExists(fileUri: vscode.Uri): Promise<void> {
@@ -245,6 +363,46 @@ function parentDirectoryUri(uri: vscode.Uri): vscode.Uri {
 	const lastSlash = normalizedPath.lastIndexOf('/');
 	const parentPath = lastSlash > 0 ? normalizedPath.slice(0, lastSlash) : '/';
 	return uri.with({ path: parentPath });
+}
+
+async function findTypeUsageRanges(fileUri: vscode.Uri, typeName: string): Promise<vscode.Range[]> {
+const source = Buffer.from(await vscode.workspace.fs.readFile(fileUri)).toString();
+const escapedTypeName = escapeRegExp(typeName);
+const usagePattern = new RegExp(`\\b${escapedTypeName}\\b`, 'g');
+const ranges: vscode.Range[] = [];
+let match: RegExpExecArray | null;
+
+while ((match = usagePattern.exec(source)) !== null) {
+const startOffset = match.index;
+const endOffset = startOffset + typeName.length;
+const start = offsetToPosition(source, startOffset);
+const end = offsetToPosition(source, endOffset);
+if (start.line !== end.line) {
+continue;
+}
+
+ranges.push(new vscode.Range(start, end));
+}
+
+return ranges;
+}
+
+function getSimpleTypeName(importName: string): string {
+const lastDot = importName.lastIndexOf('.');
+return lastDot >= 0 ? importName.slice(lastDot + 1) : importName;
+}
+
+function escapeRegExp(value: string): string {
+return value.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
+}
+
+function offsetToPosition(source: string, offset: number): vscode.Position {
+const safeOffset = Math.max(0, Math.min(offset, source.length));
+const precedingText = source.slice(0, safeOffset);
+const lines = precedingText.split(/\r?\n/);
+const line = Math.max(0, lines.length - 1);
+const character = lines[lines.length - 1]?.length ?? 0;
+return new vscode.Position(line, character);
 }
 
 async function reloadJavaProjects(): Promise<void> {

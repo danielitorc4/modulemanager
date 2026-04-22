@@ -9,6 +9,7 @@ import { pomTemplate, buildGradleTemplate } from '../build/templates';
 import { precheckMavenModule } from '../build/mavenPrecheck';
 
 const MANAGED_REFERENCED_LIBRARY_PATTERNS = ['lib/**/*.jar', '**/lib/**/*.jar', '**/target/dependency/*.jar'];
+const MANAGED_GENERATED_BLOCKER_PATTERNS = ['**/ModuleManagerDependencyViolationBlocker.java', '**/ModuleManagerDependencyViolationBlocker__*.java'];
 
 export interface WorkspaceModuleTypeSummary {
 	hasBasicModules: boolean;
@@ -279,6 +280,9 @@ export function applyManagedWorkspaceSettings(
 	filesExclude[`**/${CONFIG_PATHS.MODULE_DESCRIPTOR}`] = true;
 	filesExclude[`**/${CONFIG_PATHS.ECLIPSE_PROJECT}`] = true;
 	filesExclude[`**/${CONFIG_PATHS.ECLIPSE_CLASSPATH}`] = true;
+	for (const pattern of MANAGED_GENERATED_BLOCKER_PATTERNS) {
+		filesExclude[pattern] = true;
+	}
 	updatedSettings['files.exclude'] = filesExclude;
 
 	if (moduleTypeSummary.hasMavenModules) {
