@@ -594,23 +594,18 @@ export function extractJavaModuleName(
 	moduleByName: Map<string, ModuleDependency>
 ): string | null {
 	let bestMatch: string | null = null;
-	let bestScore = -1;
 
 	for (const moduleName of moduleByName.keys()) {
 		const directPrefix = `${moduleName}.`;
-		const nestedSegment = `.${moduleName}.`;
 		const isDirectMatch = importSpecifier === moduleName || importSpecifier.startsWith(directPrefix);
-		const isNestedSegmentMatch =
-			importSpecifier.includes(nestedSegment) || importSpecifier.endsWith(`.${moduleName}`);
 
-		const score = isDirectMatch ? 2 : isNestedSegmentMatch ? 1 : 0;
-		if (score === 0) {
+		if (!isDirectMatch) {
 			continue;
 		}
 
-		if (score > bestScore || (score === bestScore && (!bestMatch || moduleName.length > bestMatch.length))) {
+		// Prefer the longest matching module name to resolve ambiguities like "order" vs "orders".
+		if (!bestMatch || moduleName.length > bestMatch.length) {
 			bestMatch = moduleName;
-			bestScore = score;
 		}
 	}
 

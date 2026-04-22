@@ -194,7 +194,7 @@ function isInsideWorkspace(workspaceUri: vscode.Uri, selectedUri: vscode.Uri): b
 	return relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath);
 }
 
-async function updateVSCodeSettings(workspaceUri: vscode.Uri): Promise<void> {
+export async function updateVSCodeSettings(workspaceUri: vscode.Uri): Promise<void> {
 	const vscodeDir = vscode.Uri.joinPath(workspaceUri, '.vscode');
 	const settingsUri = vscode.Uri.joinPath(vscodeDir, 'settings.json');
 
