@@ -48,7 +48,7 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(extractJavaModuleName('orders.api.OrderService', moduleByName), 'orders');
 	});
 
-	test('Returns null for imports where module name appears only as a nested package segment', () => {
+	test('Returns null for nested package segment matches (stricter direct-prefix-only mode)', () => {
 		// Strict mode: only direct-prefix matches are accepted to avoid false-positives when a
 		// module name coincidentally appears inside an external library package path.
 		const moduleByName = new Map([

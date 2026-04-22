@@ -34,6 +34,7 @@ const BLOCKED_CLASSPATH_CONTENT = [
 const STARTUP_RELOAD_RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 let reloadTimer: NodeJS.Timeout | undefined;
 let diagnosticsTimer: NodeJS.Timeout | undefined;
+let startupReloadRetryTimers: NodeJS.Timeout[] = [];
 let dependencyDiagnosticsCollection: vscode.DiagnosticCollection | undefined;
 let javaCommandsCache: { hasReload: boolean; hasClean: boolean; checkedAt: number } | undefined;
 let hasLoggedUnavailableJavaCommands = false;
@@ -158,13 +159,13 @@ void reloadJavaProjects();
  * Java commands are confirmed available (javaReloadSucceeded becomes true).
  */
 function scheduleStartupJavaProjectReloadRetries(): void {
-for (const delayMs of STARTUP_RELOAD_RETRY_DELAYS_MS) {
-setTimeout(() => {
-if (!javaReloadSucceeded) {
-void reloadJavaProjects();
-}
-}, delayMs);
-}
+	startupReloadRetryTimers = STARTUP_RELOAD_RETRY_DELAYS_MS.map(delayMs =>
+		setTimeout(() => {
+			if (!javaReloadSucceeded) {
+				void reloadJavaProjects();
+			}
+		}, delayMs)
+	);
 }
 
 function scheduleDependencyDiagnosticsRefresh(): void {
@@ -351,4 +352,9 @@ checkedAt: Date.now()
 return javaCommandsCache;
 }
 
-export function deactivate() {}
+export function deactivate() {
+	for (const timer of startupReloadRetryTimers) {
+		clearTimeout(timer);
+	}
+	startupReloadRetryTimers = [];
+}
