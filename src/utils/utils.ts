@@ -178,8 +178,60 @@ export function stripJsonComments(input: string): string {
     return output;
 }
 
+export function stripJsonTrailingCommas(input: string): string {
+    let output = '';
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < input.length; index++) {
+        const char = input[index];
+
+        if (inString) {
+            output += char;
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+
+            if (char === '\\') {
+                escaped = true;
+                continue;
+            }
+
+            if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            output += char;
+            continue;
+        }
+
+        if (char === ',') {
+            let lookAhead = index + 1;
+            while (lookAhead < input.length && /\s/.test(input[lookAhead])) {
+                lookAhead++;
+            }
+
+            const nextToken = input[lookAhead];
+            if (nextToken === '}' || nextToken === ']') {
+                continue;
+            }
+        }
+
+        output += char;
+    }
+
+    return output;
+}
+
 export function parseJsonWithComments<T = unknown>(input: string): T {
-    return JSON.parse(stripJsonComments(input)) as T;
+    const withoutComments = stripJsonComments(input);
+    const withoutTrailingCommas = stripJsonTrailingCommas(withoutComments);
+    return JSON.parse(withoutTrailingCommas) as T;
 }
 
 

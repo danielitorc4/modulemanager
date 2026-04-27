@@ -1,49 +1,72 @@
-import * as path from 'path';
 import * as vscode from 'vscode';
 import { CONFIG_PATHS } from '../constants';
-import { DiscoveredModule } from '../types';
+import { ManagedModule } from '../types';
 
 const JAVA_CONTAINER = 'org.eclipse.jdt.launching.JRE_CONTAINER';
+const ECLIPSE_SETTINGS_DIR = '.settings';
+const JDT_CORE_PREFS_FILE = 'org.eclipse.jdt.core.prefs';
+const JDT_CORE_PREFS_CONTENT = [
+    'eclipse.preferences.version=1',
+    'org.eclipse.jdt.core.compiler.problem.forbiddenReference=error',
+    ''
+].join('\n');
 
-interface ModuleWorkspaceContext {
-    module: DiscoveredModule;
-    projectNameByModule: Map<string, string>;
+interface ClasspathAccessEntry {
+    projectPath: string;
+    accessRuleKind: 'accessible' | 'non-accessible';
 }
 
 export async function syncModuleMetadata(
     workspaceUri: vscode.Uri,
-    module: DiscoveredModule,
-    allModules: DiscoveredModule[]
+    module: ManagedModule,
+    allModules: ManagedModule[]
 ): Promise<void> {
+    const basicModules = allModules.filter(currentModule => currentModule.resolvedType === 'basic');
     const projectNameByModule = new Map<string, string>();
-    for (const currentModule of allModules) {
-        projectNameByModule.set(currentModule.descriptor.name, getProjectName(workspaceUri, currentModule));
+    for (const currentModule of basicModules) {
+        projectNameByModule.set(currentModule.descriptor.name, currentModule.projectName);
     }
 
-    const context: ModuleWorkspaceContext = {
-        module,
-        projectNameByModule
-    };
-
-    await writeProjectFile(workspaceUri, context);
-    await writeClasspathFile(workspaceUri, context, allModules);
+    await writeProjectFile(module, projectNameByModule);
+    await writeClasspathFile(workspaceUri, module, basicModules, projectNameByModule);
+    await writeJdtCompilerPrefsFile(module.moduleUri);
 }
 
-async function writeProjectFile(workspaceUri: vscode.Uri, context: ModuleWorkspaceContext): Promise<void> {
-    const { module } = context;
+export async function removeEclipseMetadata(moduleUri: vscode.Uri): Promise<void> {
+    const eclipseMetadataUris = [
+        vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.ECLIPSE_PROJECT),
+        vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.ECLIPSE_CLASSPATH),
+        vscode.Uri.joinPath(moduleUri, '.settings', 'org.eclipse.jdt.core.prefs')
+    ];
+
+    for (const metadataUri of eclipseMetadataUris) {
+        try {
+            await vscode.workspace.fs.delete(metadataUri, { recursive: false, useTrash: false });
+        } catch {
+            // Keep metadata cleanup idempotent.
+        }
+    }
+}
+
+async function writeProjectFile(
+    module: ManagedModule,
+    projectNameByModule: Map<string, string>
+): Promise<void> {
     const projectUri = vscode.Uri.joinPath(module.moduleUri, CONFIG_PATHS.ECLIPSE_PROJECT);
-    const projectName = getProjectName(workspaceUri, module);
+    const declaredDependencies = new Set(module.descriptor.dependencies);
+
+    const dependencyProjectEntries = Array.from(projectNameByModule.entries())
+        .filter(([dependencyName]) => declaredDependencies.has(dependencyName) && dependencyName !== module.descriptor.name)
+        .map(([, dependencyProjectName]) => `    <project>${escapeXml(dependencyProjectName)}</project>`)
+        .sort((left, right) => left.localeCompare(right));
 
     const projectXml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<projectDescription>',
-        `  <name>${escapeXml(projectName)}</name>`,
+        `  <name>${escapeXml(module.projectName)}</name>`,
         '  <comment></comment>',
         '  <projects>',
-        ...module.descriptor.dependencies.map(dependencyName => {
-            const dependencyProjectName = context.projectNameByModule.get(dependencyName);
-            return dependencyProjectName ? `    <project>${escapeXml(dependencyProjectName)}</project>` : '';
-        }).filter(Boolean),
+        ...dependencyProjectEntries,
         '  </projects>',
         '  <buildSpec>',
         '    <buildCommand>',
@@ -63,25 +86,28 @@ async function writeProjectFile(workspaceUri: vscode.Uri, context: ModuleWorkspa
 
 async function writeClasspathFile(
     workspaceUri: vscode.Uri,
-    context: ModuleWorkspaceContext,
-    allModules: DiscoveredModule[]
+    module: ManagedModule,
+    allModules: ManagedModule[],
+    projectNameByModule: Map<string, string>
 ): Promise<void> {
-    const { module } = context;
     const classpathUri = vscode.Uri.joinPath(module.moduleUri, CONFIG_PATHS.ECLIPSE_CLASSPATH);
+    const sourceEntries = await resolveClasspathSourceEntries(module.moduleUri);
 
-    const dependencyEntries = resolveDependencyEntries(context, module, allModules).map(entry =>
-        `  <classpathentry kind="src" path="${escapeXml(entry)}" combineaccessrules="false"/>`
-    );
+    const accessEntries = resolveClasspathAccessEntries(workspaceUri, module, allModules, projectNameByModule).map(entry => [
+        `  <classpathentry kind="src" path="${escapeXml(entry.projectPath)}" combineaccessrules="false">`,
+        '    <accessrules>',
+        `      <accessrule kind="${entry.accessRuleKind}" pattern="**"/>`,
+        '    </accessrules>',
+        '  </classpathentry>'
+    ].join('\n'));
 
     const classpathXml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<classpath>',
-        '  <classpathentry kind="src" path="src/main/java"/>',
-        '  <classpathentry kind="src" path="src/test/java"/>',
-        '  <classpathentry kind="src" path="src/main/resources"/>',
-        ...dependencyEntries,
+        ...sourceEntries,
+        ...accessEntries,
         `  <classpathentry kind="con" path="${JAVA_CONTAINER}"/>`,
-        '  <classpathentry kind="output" path="bin"/>',
+        `  <classpathentry kind="output" path="${escapeXml(module.outputPaths.basicClasspathOutput)}"/>`,
         '</classpath>',
         ''
     ].join('\n');
@@ -89,27 +115,42 @@ async function writeClasspathFile(
     await vscode.workspace.fs.writeFile(classpathUri, Buffer.from(classpathXml));
 }
 
-function resolveDependencyEntries(
-    context: ModuleWorkspaceContext,
-    module: DiscoveredModule,
-    allModules: DiscoveredModule[]
-): string[] {
-    const moduleByName = new Map(allModules.map(discoveredModule => [discoveredModule.descriptor.name, discoveredModule]));
+export function resolveClasspathAccessEntries(
+    workspaceUri: vscode.Uri,
+    module: ManagedModule,
+    allModules: ManagedModule[],
+    projectNameByModule?: Map<string, string>
+): ClasspathAccessEntry[] {
+    const projectNameByModuleFallback = new Map<string, string>();
+    for (const currentModule of allModules) {
+        projectNameByModuleFallback.set(currentModule.descriptor.name, currentModule.projectName);
+    }
+    const effectiveProjectNameByModule = projectNameByModule ?? projectNameByModuleFallback;
 
-    const entries = module.descriptor.dependencies
-        .map(dependencyName => moduleByName.get(dependencyName))
-        .filter((dependency): dependency is DiscoveredModule => Boolean(dependency))
-        .map(dependency => context.projectNameByModule.get(dependency.descriptor.name))
-        .filter((projectName): projectName is string => Boolean(projectName))
-        .map(projectName => `/${projectName}`);
+    const declaredDependencies = new Set(module.descriptor.dependencies);
+    const entries: ClasspathAccessEntry[] = [];
 
-    return Array.from(new Set(entries)).sort();
-}
+    for (const dependency of allModules) {
+        if (dependency.moduleUri.fsPath === module.moduleUri.fsPath || dependency.resolvedType !== 'basic') {
+            continue;
+        }
 
-function getProjectName(workspaceUri: vscode.Uri, module: DiscoveredModule): string {
-    const modulePath = path.relative(workspaceUri.fsPath, module.moduleUri.fsPath).replace(/\\/g, '/');
-    const normalizedPath = modulePath.replace(/\//g, '.');
-    return `modulemanager.${normalizedPath}`;
+        const projectName = effectiveProjectNameByModule.get(dependency.descriptor.name);
+        if (!projectName) {
+            continue;
+        }
+
+        const accessRuleKind: ClasspathAccessEntry['accessRuleKind'] = declaredDependencies.has(dependency.descriptor.name)
+            ? 'accessible'
+            : 'non-accessible';
+
+        entries.push({
+            projectPath: `/${projectName}`,
+            accessRuleKind
+        });
+    }
+
+    return entries.sort((left, right) => left.projectPath.localeCompare(right.projectPath));
 }
 
 function escapeXml(value: string): string {
@@ -119,4 +160,38 @@ function escapeXml(value: string): string {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&apos;');
+}
+
+async function writeJdtCompilerPrefsFile(moduleUri: vscode.Uri): Promise<void> {
+    const settingsDirUri = vscode.Uri.joinPath(moduleUri, ECLIPSE_SETTINGS_DIR);
+    const prefsUri = vscode.Uri.joinPath(settingsDirUri, JDT_CORE_PREFS_FILE);
+    await vscode.workspace.fs.createDirectory(settingsDirUri);
+    await vscode.workspace.fs.writeFile(prefsUri, Buffer.from(JDT_CORE_PREFS_CONTENT));
+}
+
+async function resolveClasspathSourceEntries(moduleUri: vscode.Uri): Promise<string[]> {
+    const candidatePaths = ['src/main/java', 'src/test/java', 'src/main/resources'];
+    const entries: string[] = [];
+
+    for (const candidatePath of candidatePaths) {
+        const candidateUri = vscode.Uri.joinPath(moduleUri, ...candidatePath.split('/'));
+        if (await fileExists(candidateUri)) {
+            entries.push(`  <classpathentry kind="src" path="${escapeXml(candidatePath)}"/>`);
+        }
+    }
+
+    if (entries.length === 0) {
+        entries.push('  <classpathentry kind="src" path="src/main/java"/>');
+    }
+
+    return entries;
+}
+
+async function fileExists(uri: vscode.Uri): Promise<boolean> {
+    try {
+        await vscode.workspace.fs.stat(uri);
+        return true;
+    } catch {
+        return false;
+    }
 }

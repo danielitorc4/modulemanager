@@ -6,9 +6,11 @@ import {
 	extractJavaModuleName
 } from '../commands/dependencyManager';
 import {
-	applyManagedWorkspaceSettings,
-	summarizeWorkspaceModuleTypes
-} from '../commands/createModule';
+	applyManagedModuleSettings,
+	applyManagedRootSettings
+} from '../workspace/settingsSync';
+import { summarizeWorkspaceModuleTypes } from '../workspace/managedWorkspace';
+import { resolveClasspathAccessEntries } from '../build/eclipseMetadataManager';
 import { normalizeModuleDescriptor } from '../moduleDescriptors';
 import { parseJsonWithComments, stripJsonComments } from '../utils/utils';
 
@@ -62,7 +64,7 @@ suite('Extension Test Suite', () => {
 			'{',
 			'  // proxy setting',
 			'  "proxy": "http://proxy.internal:3128",',
-			'  "repository": "https://repo.example.com/maven"',
+			'  "repository": "https://repo.example.com/maven",',
 			'}'
 		].join('\n'));
 
@@ -107,40 +109,129 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(normalized.createdAt, '2026-01-15T10:30:00.000Z');
 	});
 
-	test('Applies managed settings by workspace module types', () => {
+	test('Applies managed root settings by workspace module types', () => {
 		const summary = summarizeWorkspaceModuleTypes(['maven']);
-		const updated = applyManagedWorkspaceSettings(
+		const updated = applyManagedRootSettings(
 			{
 				'files.exclude': { '**/.git': true },
 				'java.project.referencedLibraries': ['lib/**/*.jar', 'custom/**/*.jar']
 			},
+			vscode.Uri.file('c:/workspace'),
 			summary
 		) as Record<string, unknown>;
 
 		assert.strictEqual(updated['java.import.maven.enabled'], true);
-		assert.strictEqual(updated['maven.executable.preferMavenWrapper'], true);
-		assert.strictEqual(updated['java.configuration.updateBuildConfiguration'], 'automatic');
-		assert.deepStrictEqual(updated['java.project.referencedLibraries'], ['custom/**/*.jar']);
+		assert.strictEqual(updated['java.import.gradle.enabled'], undefined);
+		assert.strictEqual(updated['java.project.referencedLibraries'], undefined);
 
 		const filesExclude = updated['files.exclude'] as Record<string, unknown>;
 		assert.strictEqual(filesExclude['**/.module.json'], true);
 		assert.strictEqual(filesExclude['**/.project'], true);
 		assert.strictEqual(filesExclude['**/.classpath'], true);
 		assert.strictEqual(filesExclude['**/.git'], true);
+		assert.deepStrictEqual(updated['java.import.exclusions'], ['**']);
 	});
 
 	test('Keeps managed referenced libraries for basic modules', () => {
-		const summary = summarizeWorkspaceModuleTypes(['basic']);
-		const updated = applyManagedWorkspaceSettings({}, summary) as Record<string, unknown>;
+		const updated = applyManagedModuleSettings(
+			{
+				descriptor: {
+					name: 'orders',
+					type: 'basic',
+					createdAt: '2026-01-15T10:30:00.000Z',
+					dependencies: []
+				},
+				moduleUri: vscode.Uri.file('c:/workspace/orders'),
+				modulePath: 'orders',
+				resolvedType: 'basic',
+				projectName: 'modulemanager.orders',
+				outputPaths: {
+					basicClasspathOutput: '.modulemanager/bin/orders',
+					mavenBuildDirectory: '.modulemanager/target/orders',
+					gradleBuildDirectory: '.modulemanager/gradle/orders'
+				}
+			},
+			{
+				'java.project.sourcePaths': ['backend/src/main/java', 'frontend/src/main/java'],
+				'java.project.referencedLibraries': ['custom/**/*.jar']
+			}
+		) as Record<string, unknown>;
 
 		const referencedLibraries = updated['java.project.referencedLibraries'];
 		assert.ok(Array.isArray(referencedLibraries));
 		assert.deepStrictEqual(referencedLibraries, [
+			'custom/**/*.jar',
 			'lib/**/*.jar',
 			'**/lib/**/*.jar',
 			'**/target/dependency/*.jar'
 		]);
+		assert.strictEqual(updated['java.project.sourcePaths'], undefined);
 		assert.strictEqual(updated['java.import.maven.enabled'], undefined);
 		assert.strictEqual(updated['maven.executable.preferMavenWrapper'], undefined);
+	});
+
+	test('Marks declared workspace modules accessible and undeclared ones blocked in classpath access rules', () => {
+		const workspaceUri = vscode.Uri.file('c:/workspace');
+		const module = {
+			descriptor: {
+				name: 'orders',
+				type: 'basic',
+				createdAt: '2026-01-15T10:30:00.000Z',
+				dependencies: ['billing']
+			},
+			moduleUri: vscode.Uri.file('c:/workspace/orders'),
+			modulePath: 'orders',
+			resolvedType: 'basic',
+			projectName: 'modulemanager.orders',
+			outputPaths: {
+				basicClasspathOutput: '.modulemanager/bin/orders',
+				mavenBuildDirectory: '.modulemanager/target/orders',
+				gradleBuildDirectory: '.modulemanager/gradle/orders'
+			}
+		};
+		const allModules = [
+			module,
+			{
+				descriptor: {
+					name: 'billing',
+					type: 'basic',
+					createdAt: '2026-01-15T10:30:00.000Z',
+					dependencies: []
+				},
+				moduleUri: vscode.Uri.file('c:/workspace/billing'),
+				modulePath: 'billing',
+				resolvedType: 'basic',
+				projectName: 'modulemanager.billing',
+				outputPaths: {
+					basicClasspathOutput: '.modulemanager/bin/billing',
+					mavenBuildDirectory: '.modulemanager/target/billing',
+					gradleBuildDirectory: '.modulemanager/gradle/billing'
+				}
+			},
+			{
+				descriptor: {
+					name: 'inventory',
+					type: 'basic',
+					createdAt: '2026-01-15T10:30:00.000Z',
+					dependencies: []
+				},
+				moduleUri: vscode.Uri.file('c:/workspace/inventory'),
+				modulePath: 'inventory',
+				resolvedType: 'basic',
+				projectName: 'modulemanager.inventory',
+				outputPaths: {
+					basicClasspathOutput: '.modulemanager/bin/inventory',
+					mavenBuildDirectory: '.modulemanager/target/inventory',
+					gradleBuildDirectory: '.modulemanager/gradle/inventory'
+				}
+			}
+		] as any;
+
+		const accessEntries = resolveClasspathAccessEntries(workspaceUri, module as any, allModules);
+
+		assert.deepStrictEqual(accessEntries, [
+			{ projectPath: '/modulemanager.billing', accessRuleKind: 'accessible' },
+			{ projectPath: '/modulemanager.inventory', accessRuleKind: 'non-accessible' }
+		]);
 	});
 });

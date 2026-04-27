@@ -1,49 +1,83 @@
 import * as vscode from 'vscode';
 import { CONFIG_PATHS } from '../constants';
-import { findModuleDescriptors } from '../moduleDescriptors';
+import { ManagedModule, WorkspaceModuleTypeSummary } from '../types';
+import {
+    discoverManagedModules,
+    reconcileWorkspaceLayout,
+    resolveManagementRootUri,
+    summarizeWorkspaceModuleTypes
+} from '../workspace/managedWorkspace';
+import { syncDistributedWorkspaceSettings } from '../workspace/settingsSync';
 import * as gradleManager from './gradleManager';
 import * as eclipseMetadataManager from './eclipseMetadataManager';
 import * as pomManager from './pomManager';
 
-export async function syncAllModules(workspaceUri: vscode.Uri): Promise<void> {
-    const modules = await findModuleDescriptors(workspaceUri);
-
-    for (const module of modules) {
-        const { descriptor, moduleUri } = module;
-
-        if (descriptor.type === 'basic') {
-            await eclipseMetadataManager.syncModuleMetadata(workspaceUri, module, modules);
-            continue;
-        }
-
-        await removeEclipseMetadata(moduleUri);
-
-        if (descriptor.type === 'maven') {
-            const pomUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.POM_XML);
-            if (await fileExists(pomUri)) {
-                await pomManager.syncModuleDependencies(moduleUri, descriptor.dependencies, modules);
-            }
-            continue;
-        }
-
-        const gradleUri = vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.BUILD_GRADLE);
-        if (await fileExists(gradleUri)) {
-            await gradleManager.syncModuleDependencies(moduleUri, descriptor.dependencies, modules);
-        }
-    }
+export interface WorkspaceReconcileResult {
+    managementRootUri: vscode.Uri;
+    modules: ManagedModule[];
+    moduleTypeSummary: WorkspaceModuleTypeSummary;
+    workspaceFoldersChanged: boolean;
+    shouldCleanJavaWorkspace: boolean;
 }
 
-async function removeEclipseMetadata(moduleUri: vscode.Uri): Promise<void> {
-    const eclipseMetadataUris = [
-        vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.ECLIPSE_PROJECT),
-        vscode.Uri.joinPath(moduleUri, CONFIG_PATHS.ECLIPSE_CLASSPATH)
-    ];
+export async function reconcileWorkspaceModel(resourceUri?: vscode.Uri): Promise<WorkspaceReconcileResult | null> {
+    const managementRootUri = await resolveManagementRootUri(resourceUri);
+    if (!managementRootUri) {
+        return null;
+    }
 
-    for (const metadataUri of eclipseMetadataUris) {
-        try {
-            await vscode.workspace.fs.delete(metadataUri, { recursive: false, useTrash: false });
-        } catch {
-            // Ignore missing files to keep sync idempotent.
+    const modules = await discoverManagedModules(managementRootUri);
+    const moduleTypeSummary = summarizeWorkspaceModuleTypes(modules.map(module => module.resolvedType));
+
+    const layout = await reconcileWorkspaceLayout(managementRootUri, modules);
+    await syncDistributedWorkspaceSettings(managementRootUri, modules, moduleTypeSummary);
+
+    for (const module of modules) {
+        await syncSingleModule(managementRootUri, module, modules);
+    }
+
+    return {
+        managementRootUri,
+        modules,
+        moduleTypeSummary,
+        workspaceFoldersChanged: layout.workspaceFoldersChanged,
+        shouldCleanJavaWorkspace: layout.workspaceFoldersChanged
+    };
+}
+
+async function syncSingleModule(
+    managementRootUri: vscode.Uri,
+    module: ManagedModule,
+    allModules: ManagedModule[]
+): Promise<void> {
+    if (module.resolvedType === 'basic') {
+        await eclipseMetadataManager.syncModuleMetadata(managementRootUri, module, allModules);
+    } else {
+        await eclipseMetadataManager.removeEclipseMetadata(module.moduleUri);
+    }
+
+    if (module.resolvedType === 'maven') {
+        const pomUri = vscode.Uri.joinPath(module.moduleUri, CONFIG_PATHS.POM_XML);
+        if (await fileExists(pomUri)) {
+            await pomManager.syncModuleDependencies(
+                module.moduleUri,
+                module.descriptor.dependencies,
+                allModules,
+                module.outputPaths.mavenBuildDirectory
+            );
+        }
+        return;
+    }
+
+    if (module.resolvedType === 'gradle') {
+        const gradleUri = vscode.Uri.joinPath(module.moduleUri, CONFIG_PATHS.BUILD_GRADLE);
+        if (await fileExists(gradleUri)) {
+            await gradleManager.syncModuleDependencies(
+                module.moduleUri,
+                module.descriptor.dependencies,
+                allModules,
+                module.outputPaths.gradleBuildDirectory
+            );
         }
     }
 }

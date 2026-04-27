@@ -16,6 +16,13 @@ export function pomTemplate(artifactId: string): string {
         <!-- no modulemanager dependencies -->
         <!-- modulemanager:managed-dependencies:end -->
   </dependencies>
+  <build>
+      <!-- modulemanager:managed-build:start -->
+      <directory>.modulemanager/target/${artifactId}</directory>
+      <outputDirectory>.modulemanager/target/${artifactId}/classes</outputDirectory>
+      <testOutputDirectory>.modulemanager/target/${artifactId}/test-classes</testOutputDirectory>
+      <!-- modulemanager:managed-build:end -->
+  </build>
 </project>
 `;
 }
@@ -40,5 +47,9 @@ dependencies {
     // no modulemanager dependencies
     // modulemanager:managed-dependencies:end
 }
+
+// modulemanager:managed-output:start
+layout.buildDirectory = file('.modulemanager/gradle/default')
+// modulemanager:managed-output:end
 `;
 }

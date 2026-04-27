@@ -1,9 +1,9 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { REGEX } from '../constants';
-import { syncAllModules } from '../build/buildFileManager';
+import { reconcileWorkspaceModel } from '../build/buildFileManager';
 import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescriptors';
-import { resolveWorkspaceFolder } from '../utils/utils';
+import { resolveManagementRootUri } from '../workspace/managedWorkspace';
 
 interface ModuleDependency {
 	moduleName: string;
@@ -39,13 +39,13 @@ interface JavaImportMatch {
  * Adds a dependency from one module to another.
  */
 export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length === 0) {
 		vscode.window.showWarningMessage('No modules found in the project.');
 		return;
@@ -102,7 +102,7 @@ export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<voi
 		await updateDescriptorDependencies(sourceModule.module.moduleUri, dependencies =>
 			Array.from(new Set([...dependencies, targetModule.module.moduleName]))
 		);
-		await syncAllModules(workspaceFolder.uri);
+		await reconcileWorkspaceModel(managementRootUri);
 
 		vscode.window.showInformationMessage(
 			`Added dependency: "${sourceModule.module.moduleName}" now depends on "${targetModule.module.moduleName}".`
@@ -116,13 +116,13 @@ export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<voi
  * Removes a dependency from a module.
  */
 export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length === 0) {
 		vscode.window.showWarningMessage('No modules found in the project.');
 		return;
@@ -161,7 +161,7 @@ export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<
 		await updateDescriptorDependencies(selectedModule.module.moduleUri, dependencies =>
 			dependencies.filter(dependency => dependency !== dependencyToRemove.dependency)
 		);
-		await syncAllModules(workspaceFolder.uri);
+		await reconcileWorkspaceModel(managementRootUri);
 
 		vscode.window.showInformationMessage(
 			`Removed dependency: "${selectedModule.module.moduleName}" no longer depends on "${dependencyToRemove.dependency}".`
@@ -175,13 +175,13 @@ export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<
  * Shows all module dependencies in the project.
  */
 export async function showModuleDependencies(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length === 0) {
 		vscode.window.showWarningMessage('No modules found in the project.');
 		return;
@@ -223,19 +223,19 @@ export async function showModuleDependencies(resourceUri?: vscode.Uri): Promise<
  * Validates imports across modules and offers one-click fix to add missing dependencies.
  */
 export async function validateModuleDependencies(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length < 2) {
 		vscode.window.showInformationMessage('Not enough modules found to validate dependencies.');
 		return;
 	}
 
-	const missingDependencies = await findMissingDependencies(workspaceFolder.uri, modules);
+	const missingDependencies = await findMissingDependencies(managementRootUri, modules);
 	if (missingDependencies.length === 0) {
 		vscode.window.showInformationMessage('No missing module dependencies were detected.');
 		return;
@@ -244,7 +244,7 @@ export async function validateModuleDependencies(resourceUri?: vscode.Uri): Prom
 	const selected = await vscode.window.showQuickPick(
 		missingDependencies.map(item => ({
 			label: `${item.sourceModule} -> ${item.targetModule}`,
-			description: path.relative(workspaceFolder.uri.fsPath, item.filePath),
+			description: path.relative(managementRootUri.fsPath, item.filePath),
 			detail: `Import: ${item.importName}`,
 			item
 		})),
@@ -275,7 +275,7 @@ export async function validateModuleDependencies(resourceUri?: vscode.Uri): Prom
 		await updateDescriptorDependencies(sourceModule.moduleUri, dependencies =>
 			Array.from(new Set([...dependencies, selected.item.targetModule]))
 		);
-		await syncAllModules(workspaceFolder.uri);
+		await reconcileWorkspaceModel(managementRootUri);
 
 		vscode.window.showInformationMessage(
 			`Added dependency: "${selected.item.sourceModule}" now depends on "${selected.item.targetModule}".`
@@ -352,7 +352,12 @@ async function updateDescriptorDependencies(
 		throw new Error('No workspace folder found for module');
 	}
 
-	const modules = await findModuleDescriptors(workspaceFolder.uri);
+	const managementRootUri = await resolveManagementRootUri(moduleUri);
+	if (!managementRootUri) {
+		throw new Error('No managed workspace root available');
+	}
+
+	const modules = await findModuleDescriptors(managementRootUri);
 	const descriptorEntry = modules.find(module => module.moduleUri.fsPath === moduleUri.fsPath);
 	if (!descriptorEntry) {
 		throw new Error('Module descriptor not found');
