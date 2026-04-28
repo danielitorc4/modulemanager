@@ -18,6 +18,7 @@ interface CodeWorkspaceFile {
 
 const MANAGED_ROOT_FOLDER_NAME = 'modulemanager-root';
 const MANAGEMENT_ROOT_CONFIG_KEY = 'managementRoot';
+let hasPromptedToOpenManagedWorkspaceInSession = false;
 
 export async function resolveManagementRootUri(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
     const workspaceFile = vscode.workspace.workspaceFile;
@@ -109,7 +110,6 @@ export async function reconcileWorkspaceLayout(
     modules: ManagedModule[]
 ): Promise<{ workspaceFileUri: vscode.Uri; workspaceFoldersChanged: boolean }> {
     const workspaceFileUri = getManagedWorkspaceFileUri(managementRootUri);
-    const workspaceFileExistedBefore = await fileExists(workspaceFileUri);
 
     await syncCodeWorkspaceFile(workspaceFileUri, managementRootUri, modules);
 
@@ -118,7 +118,8 @@ export async function reconcileWorkspaceLayout(
     // untitled multi-root workspace and prompt the user to save it on close.
     // Instead, offer to open the generated .code-workspace file.
     if (!vscode.workspace.workspaceFile) {
-        if (!workspaceFileExistedBefore) {
+        if (modules.length > 0 && !hasPromptedToOpenManagedWorkspaceInSession) {
+            hasPromptedToOpenManagedWorkspaceInSession = true;
             const choice = await vscode.window.showInformationMessage(
                 `ModuleManager generated '${CONFIG_PATHS.CODE_WORKSPACE}'. Open it to enable full module isolation.`,
                 'Open Workspace'

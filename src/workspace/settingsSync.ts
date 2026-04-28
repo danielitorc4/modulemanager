@@ -35,6 +35,9 @@ export function applyManagedRootSettings(
     moduleTypeSummary: WorkspaceModuleTypeSummary
 ): Record<string, unknown> {
     const updatedSettings = { ...currentSettings };
+    const managedModuleExplorerExcludePatterns = modules
+        .map(module => module.modulePath.replace(/\\/g, '/').replace(/^\.\//, ''))
+        .filter(modulePath => modulePath !== '' && modulePath !== '.');
 
     // ModuleManager core settings (always set)
     updatedSettings['modulemanager.managementRoot'] = managementRootUri.fsPath;
@@ -43,7 +46,7 @@ export function applyManagedRootSettings(
     // File/Search exclusions (merge, don't replace)
     updatedSettings['files.exclude'] = mergeBooleanMap(
         updatedSettings['files.exclude'],
-        MANAGED_FILES_EXCLUDE_PATTERNS
+        [...MANAGED_FILES_EXCLUDE_PATTERNS, ...managedModuleExplorerExcludePatterns]
     );
     updatedSettings['search.exclude'] = mergeBooleanMap(
         updatedSettings['search.exclude'],

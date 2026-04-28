@@ -138,6 +138,7 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(filesExclude['**/.module.json'], true);
 		assert.strictEqual(filesExclude['**/.project'], true);
 		assert.strictEqual(filesExclude['**/.classpath'], true);
+		assert.strictEqual(filesExclude['billing'], true);
 		assert.strictEqual(filesExclude['**/.git'], true);
 		// Exclusions should be scoped to module paths, not a blanket '**'
 		assert.deepStrictEqual(updated['java.import.exclusions'], ['billing/**']);

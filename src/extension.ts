@@ -25,6 +25,10 @@ const JAVA_RELOAD_COMMAND = 'java.reloadProjects';
 const JAVA_CLEAN_COMMAND = 'java.cleanWorkspace';
 const DIAGNOSTIC_SOURCE = 'modulemanager';
 const JAVA_EXTENSION_CHECK_TIMEOUT_MS = 5_000;
+const JAVA_COMMAND_AVAILABILITY_RETRY_COUNT = 6;
+const JAVA_COMMAND_AVAILABILITY_RETRY_DELAY_MS = 1_000;
+const JAVA_LANGUAGE_SUPPORT_EXTENSION_ID = 'redhat.java';
+const JAVA_EXTENSION_PACK_ID = 'vscjava.vscode-java-pack';
 
 // Reconciliation state to prevent infinite loops
 const MAX_RECONCILE_RESCHEDULES_PER_CYCLE = 5;
@@ -53,19 +57,12 @@ let javaRunBlockMessageCooldownUntil = 0;
  */
 async function validateJavaExtensionAvailable(): Promise<boolean> {
 	try {
-		const commands = await Promise.race([
-			vscode.commands.getCommands(true),
-			new Promise<never>((_, reject) => 
-				setTimeout(() => reject(new Error('Java extension check timeout')), JAVA_EXTENSION_CHECK_TIMEOUT_MS)
-			)
-		]);
-		
-		const hasReload = (commands as string[]).includes(JAVA_RELOAD_COMMAND);
-		const hasClean = (commands as string[]).includes(JAVA_CLEAN_COMMAND);
-		
-		if (!hasReload && !hasClean) {
+		const javaLanguageSupport = vscode.extensions.getExtension(JAVA_LANGUAGE_SUPPORT_EXTENSION_ID);
+		const javaPack = vscode.extensions.getExtension(JAVA_EXTENSION_PACK_ID);
+
+		if (!javaLanguageSupport && !javaPack) {
 			console.error(
-				'ModuleManager: Java extension (JDTLS) is not available. ' +
+				'ModuleManager: Java extension is not installed. ' +
 				'Please install the "Extension Pack for Java" or "Language Support for Java (Red Hat)" extension.'
 			);
 			vscode.window.showErrorMessage(
@@ -74,7 +71,38 @@ async function validateJavaExtensionAvailable(): Promise<boolean> {
 			);
 			return false;
 		}
-		
+
+		if (javaLanguageSupport && !javaLanguageSupport.isActive) {
+			try {
+				await Promise.race([
+					javaLanguageSupport.activate(),
+					new Promise<never>((_, reject) =>
+						setTimeout(() => reject(new Error('Java extension activation timeout')), JAVA_EXTENSION_CHECK_TIMEOUT_MS)
+					)
+				]);
+			} catch (activationError) {
+				console.warn('ModuleManager: Java extension activation did not complete in time:', activationError);
+			}
+		}
+
+		// JDTLS commands may appear a few seconds after startup; do not fail fast.
+		for (let attempt = 0; attempt < JAVA_COMMAND_AVAILABILITY_RETRY_COUNT; attempt++) {
+			const commandAvailability = await getJavaCommandAvailability(true);
+			if (commandAvailability.hasReload || commandAvailability.hasClean) {
+				return true;
+			}
+
+			if (attempt < JAVA_COMMAND_AVAILABILITY_RETRY_COUNT - 1) {
+				await delay(JAVA_COMMAND_AVAILABILITY_RETRY_DELAY_MS);
+			}
+		}
+
+		// If extension is installed but commands are still not ready, allow activation.
+		// Runtime lifecycle sync already handles temporary command unavailability.
+		console.warn(
+			'ModuleManager: Java extension is installed but commands are not available yet. ' +
+			'Continuing activation and retrying later.'
+		);
 		return true;
 	} catch (error) {
 		console.error('ModuleManager: Failed to validate Java extension:', error);
@@ -84,6 +112,10 @@ async function validateJavaExtensionAvailable(): Promise<boolean> {
 		);
 		return false;
 	}
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export async function activate(context: vscode.ExtensionContext) {

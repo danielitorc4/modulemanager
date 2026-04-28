@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { CONFIG_PATHS } from '../constants';
 import { ManagedModule } from '../types';
+import * as path from 'path';
 
 const JAVA_CONTAINER = 'org.eclipse.jdt.launching.JRE_CONTAINER';
 const ECLIPSE_SETTINGS_DIR = '.settings';
@@ -10,6 +11,9 @@ const JDT_CORE_PREFS_CONTENT = [
     'org.eclipse.jdt.core.compiler.problem.forbiddenReference=error',
     ''
 ].join('\n');
+const JAVA_SOURCE_PATHS_SETTING = 'javaSourcePaths';
+const JAVA_DISCOVERY_EXCLUDES = '**/{.git,.settings,node_modules,.modulemanager,target,build,out,bin,dist}/**';
+const JAVA_PACKAGE_REGEX = /^\s*package\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)*)\s*;/m;
 
 interface ClasspathAccessEntry {
     projectPath: string;
@@ -170,21 +174,79 @@ async function writeJdtCompilerPrefsFile(moduleUri: vscode.Uri): Promise<void> {
 }
 
 async function resolveClasspathSourceEntries(moduleUri: vscode.Uri): Promise<string[]> {
-    const candidatePaths = ['src/main/java', 'src/test/java', 'src/main/resources'];
-    const entries: string[] = [];
+    const configuredSourcePaths = getConfiguredJavaSourcePaths(moduleUri);
+    const discoveredSourcePaths = await discoverJavaSourceRoots(moduleUri);
 
-    for (const candidatePath of candidatePaths) {
-        const candidateUri = vscode.Uri.joinPath(moduleUri, ...candidatePath.split('/'));
-        if (await fileExists(candidateUri)) {
-            entries.push(`  <classpathentry kind="src" path="${escapeXml(candidatePath)}"/>`);
+    const existingConfiguredPaths: string[] = [];
+    for (const sourcePath of configuredSourcePaths) {
+        const sourceUri = vscode.Uri.joinPath(moduleUri, ...sourcePath.split('/').filter(Boolean));
+        if (await fileExists(sourceUri)) {
+            existingConfiguredPaths.push(sourcePath);
         }
     }
 
-    if (entries.length === 0) {
-        entries.push('  <classpathentry kind="src" path="src/main/java"/>');
+    const sourcePaths = Array.from(
+        new Set([...existingConfiguredPaths, ...discoveredSourcePaths])
+    );
+
+    if (sourcePaths.length === 0) {
+        const srcUri = vscode.Uri.joinPath(moduleUri, 'src');
+        return (await fileExists(srcUri))
+            ? ['  <classpathentry kind="src" path="src"/>']
+            : ['  <classpathentry kind="src" path="."/>'];
     }
 
-    return entries;
+    return sourcePaths.map(sourcePath => `  <classpathentry kind="src" path="${escapeXml(sourcePath)}"/>`);
+}
+
+function getConfiguredJavaSourcePaths(moduleUri: vscode.Uri): string[] {
+    const configured = vscode.workspace
+        .getConfiguration('modulemanager', moduleUri)
+        .get<string[]>(JAVA_SOURCE_PATHS_SETTING);
+    if (!Array.isArray(configured)) {
+        return [];
+    }
+
+    return configured
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map(normalizeRelativePath)
+        .filter(entry => entry !== '' && entry !== '.');
+}
+
+async function discoverJavaSourceRoots(moduleUri: vscode.Uri): Promise<string[]> {
+    const javaFiles = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(moduleUri, '**/*.java'),
+        JAVA_DISCOVERY_EXCLUDES
+    );
+
+    const roots = new Set<string>();
+    for (const javaFile of javaFiles) {
+        roots.add(await inferSourceRootFromJavaFile(moduleUri, javaFile));
+    }
+
+    return Array.from(roots).sort((left, right) => left.localeCompare(right));
+}
+
+async function inferSourceRootFromJavaFile(moduleUri: vscode.Uri, javaFileUri: vscode.Uri): Promise<string> {
+    const content = Buffer.from(await vscode.workspace.fs.readFile(javaFileUri)).toString();
+    const packageMatch = content.match(JAVA_PACKAGE_REGEX);
+    const packagePath = packageMatch?.[1]?.replace(/\./g, '/');
+
+    const relativeFilePath = normalizeRelativePath(path.relative(moduleUri.fsPath, javaFileUri.fsPath));
+    const fileDirectory = relativeFilePath.includes('/')
+        ? relativeFilePath.slice(0, relativeFilePath.lastIndexOf('/'))
+        : '';
+
+    if (packagePath && (fileDirectory === packagePath || fileDirectory.endsWith(`/${packagePath}`))) {
+        const sourceRoot = fileDirectory.slice(0, fileDirectory.length - packagePath.length).replace(/\/$/, '');
+        return sourceRoot || '.';
+    }
+
+    return fileDirectory || '.';
+}
+
+function normalizeRelativePath(value: string): string {
+    return value.replace(/\\/g, '/').replace(/^\.\//, '').trim();
 }
 
 async function fileExists(uri: vscode.Uri): Promise<boolean> {
