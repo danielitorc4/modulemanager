@@ -112,6 +112,12 @@ export async function reconcileWorkspaceLayout(
     await syncCodeWorkspaceFile(workspaceFileUri, managementRootUri, modules);
     const workspaceFoldersChanged = syncOpenWorkspaceFolders(managementRootUri, modules);
 
+    // If workspace folders changed, wait for JDTLS to initialize with new structure
+    // This prevents race conditions where diagnostics are sent to stale URIs
+    if (workspaceFoldersChanged) {
+        await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second grace period
+    }
+
     return {
         workspaceFileUri,
         workspaceFoldersChanged

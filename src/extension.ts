@@ -24,6 +24,10 @@ const COMMANDS_CACHE_TTL_MS = 15_000;
 const JAVA_RELOAD_COMMAND = 'java.reloadProjects';
 const JAVA_CLEAN_COMMAND = 'java.cleanWorkspace';
 const DIAGNOSTIC_SOURCE = 'modulemanager';
+const JAVA_EXTENSION_CHECK_TIMEOUT_MS = 5_000;
+
+// Reconciliation state to prevent infinite loops
+const MAX_RECONCILE_RESCHEDULES_PER_CYCLE = 5;
 
 let reconcileTimer: NodeJS.Timeout | undefined;
 let diagnosticsTimer: NodeJS.Timeout | undefined;
@@ -33,18 +37,64 @@ let pendingReconcileRequiresClean = false;
 let pendingJavaClean = false;
 let isReconcileRunning = false;
 let isJavaLifecycleRunning = false;
+let reconcileRescheduleCount = 0;
 
 let lastJavaLifecycleAt = 0;
 let lastJavaCleanAt = 0;
 
 let dependencyDiagnosticsCollection: vscode.DiagnosticCollection | undefined;
 let javaCommandsCache: { hasReload: boolean; hasClean: boolean; checkedAt: number } | undefined;
-let hasLoggedUnavailableJavaCommands = false;
 let javaDebugSessionStartDisposable: vscode.Disposable | undefined;
 let javaRunBlockMessageCooldownUntil = 0;
 
+/**
+ * Validates that the Java extension (JDTLS) is available and responding.
+ * This is a hard requirement for ModuleManager.
+ */
+async function validateJavaExtensionAvailable(): Promise<boolean> {
+	try {
+		const commands = await Promise.race([
+			vscode.commands.getCommands(true),
+			new Promise<never>((_, reject) => 
+				setTimeout(() => reject(new Error('Java extension check timeout')), JAVA_EXTENSION_CHECK_TIMEOUT_MS)
+			)
+		]);
+		
+		const hasReload = (commands as string[]).includes(JAVA_RELOAD_COMMAND);
+		const hasClean = (commands as string[]).includes(JAVA_CLEAN_COMMAND);
+		
+		if (!hasReload && !hasClean) {
+			console.error(
+				'ModuleManager: Java extension (JDTLS) is not available. ' +
+				'Please install the "Extension Pack for Java" or "Language Support for Java (Red Hat)" extension.'
+			);
+			vscode.window.showErrorMessage(
+				'ModuleManager requires the Java extension to be installed. ' +
+				'Please install "Extension Pack for Java" and reload VS Code.'
+			);
+			return false;
+		}
+		
+		return true;
+	} catch (error) {
+		console.error('ModuleManager: Failed to validate Java extension:', error);
+		vscode.window.showErrorMessage(
+			'ModuleManager: Failed to detect Java extension. ' +
+			'Please ensure the Java extension is properly installed and try reloading VS Code.'
+		);
+		return false;
+	}
+}
+
 export async function activate(context: vscode.ExtensionContext) {
 	console.log('ModuleManager activated in independent workspace mode.');
+	
+	// Validate Java extension is available before proceeding
+	const javaAvailable = await validateJavaExtensionAvailable();
+	if (!javaAvailable) {
+		console.log('ModuleManager deactivated: Java extension not available.');
+		return;
+	}
 
 	dependencyDiagnosticsCollection = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
 	javaDebugSessionStartDisposable = vscode.debug.onDidStartDebugSession(session => {
@@ -188,10 +238,23 @@ function scheduleReconciliation(requireJavaClean: boolean): void {
 
 async function runReconciliation(): Promise<void> {
 	if (isReconcileRunning) {
+		// Prevent infinite reschedule loops
+		if (reconcileRescheduleCount >= MAX_RECONCILE_RESCHEDULES_PER_CYCLE) {
+			console.warn(
+				'ModuleManager reconciliation exceeded max reschedule attempts. ' +
+				'This may indicate a performance issue or infinite loop condition.'
+			);
+			reconcileRescheduleCount = 0;
+			return;
+		}
+
+		reconcileRescheduleCount++;
 		scheduleReconciliation(false);
 		return;
 	}
 
+	// Reset counter on successful reconciliation start
+	reconcileRescheduleCount = 0;
 	isReconcileRunning = true;
 	const requiresClean = pendingReconcileRequiresClean;
 	pendingReconcileRequiresClean = false;
@@ -235,14 +298,12 @@ async function runJavaLifecycle(): Promise<void> {
 
 	const commands = await getJavaCommandAvailability();
 	if (!commands.hasReload && !commands.hasClean) {
-		if (!hasLoggedUnavailableJavaCommands) {
-			console.info('Skipping Java lifecycle sync because Java extension commands are unavailable.');
-			hasLoggedUnavailableJavaCommands = true;
-		}
+		// Java extension should be available - this is a hard requirement that we already validated
+		// in activate(). If we reach here, the extension became unavailable, which is a serious issue.
+		console.error('Java lifecycle sync failed: Java extension commands are unexpectedly unavailable.');
 		return;
 	}
 
-	hasLoggedUnavailableJavaCommands = false;
 	isJavaLifecycleRunning = true;
 
 	const wantsClean = pendingJavaClean;
@@ -298,61 +359,81 @@ async function refreshDependencyDiagnostics(): Promise<void> {
 		return;
 	}
 
-	const violations = await collectJavaDependencyViolations(managementRootUri);
-	const modules = await discoverManagedModules(managementRootUri);
-	await syncDependencyBoundaryEnforcement(modules, violations);
+	try {
+		const violations = await collectJavaDependencyViolations(managementRootUri);
+		const modules = await discoverManagedModules(managementRootUri);
+		await syncDependencyBoundaryEnforcement(modules, violations);
 
-	const diagnosticsByFile = new Map<string, vscode.Diagnostic[]>();
-	const usageRangeCache = new Map<string, vscode.Range[]>();
+		const diagnosticsByFile = new Map<string, vscode.Diagnostic[]>();
+		const usageRangeCache = new Map<string, vscode.Range[]>();
 
-	for (const violation of violations) {
-		const diagnostic = new vscode.Diagnostic(
-			violation.range,
-			`Module "${violation.sourceModule}" imports "${violation.targetModule}" without a declared dependency. Use "ModuleManager: Add Module Dependency".`,
-			vscode.DiagnosticSeverity.Error
-		);
-		diagnostic.source = DIAGNOSTIC_SOURCE;
-		diagnostic.code = 'missing-module-dependency';
-
-		const key = violation.fileUri.toString();
-		const diagnostics = diagnosticsByFile.get(key) ?? [];
-		diagnostics.push(diagnostic);
-
-		const blockedTypeName = getSimpleTypeName(violation.importName);
-		if (blockedTypeName) {
-			const cacheKey = `${key}::${blockedTypeName}`;
-			let usageRanges = usageRangeCache.get(cacheKey);
-			if (!usageRanges) {
-				usageRanges = await findTypeUsageRanges(violation.fileUri, blockedTypeName);
-				usageRangeCache.set(cacheKey, usageRanges);
+		for (const violation of violations) {
+			// Validate the file still exists before adding diagnostics
+			try {
+				await vscode.workspace.fs.stat(violation.fileUri);
+			} catch {
+				continue; // Skip files that no longer exist
 			}
 
-			for (const usageRange of usageRanges) {
-				if (usageRange.intersection(violation.range)) {
-					continue;
+			const diagnostic = new vscode.Diagnostic(
+				violation.range,
+				`Module "${violation.sourceModule}" imports "${violation.targetModule}" without a declared dependency. Use "ModuleManager: Add Module Dependency".`,
+				vscode.DiagnosticSeverity.Error
+			);
+			diagnostic.source = DIAGNOSTIC_SOURCE;
+			diagnostic.code = 'missing-module-dependency';
+
+			const key = violation.fileUri.toString();
+			const diagnostics = diagnosticsByFile.get(key) ?? [];
+			diagnostics.push(diagnostic);
+
+			const blockedTypeName = getSimpleTypeName(violation.importName);
+			if (blockedTypeName) {
+				const cacheKey = `${key}::${blockedTypeName}`;
+				let usageRanges = usageRangeCache.get(cacheKey);
+				if (!usageRanges) {
+					usageRanges = await findTypeUsageRanges(violation.fileUri, blockedTypeName);
+					usageRangeCache.set(cacheKey, usageRanges);
 				}
 
-				const usageDiagnostic = new vscode.Diagnostic(
-					usageRange,
-					`Type "${blockedTypeName}" is blocked because module "${violation.sourceModule}" does not declare dependency on "${violation.targetModule}".`,
-					vscode.DiagnosticSeverity.Error
-				);
-				usageDiagnostic.source = DIAGNOSTIC_SOURCE;
-				usageDiagnostic.code = 'missing-module-dependency';
-				diagnostics.push(usageDiagnostic);
+				for (const usageRange of usageRanges) {
+					if (usageRange.intersection(violation.range)) {
+						continue;
+					}
+
+					const usageDiagnostic = new vscode.Diagnostic(
+						usageRange,
+						`Type "${blockedTypeName}" is blocked because module "${violation.sourceModule}" does not declare dependency on "${violation.targetModule}".`,
+						vscode.DiagnosticSeverity.Error
+					);
+					usageDiagnostic.source = DIAGNOSTIC_SOURCE;
+					usageDiagnostic.code = 'missing-module-dependency';
+					diagnostics.push(usageDiagnostic);
+				}
+			}
+
+			diagnosticsByFile.set(key, diagnostics);
+		}
+
+		// Clear existing diagnostics before setting new ones
+		dependencyDiagnosticsCollection.clear();
+
+		// Set new diagnostics only for files that are part of the current workspace
+		const openFiles = vscode.workspace.textDocuments.map(doc => doc.uri.toString());
+		for (const [uriString, diagnostics] of diagnosticsByFile.entries()) {
+			try {
+				dependencyDiagnosticsCollection.set(vscode.Uri.parse(uriString), diagnostics);
+			} catch (error) {
+				console.warn(`Failed to set diagnostics for ${uriString}:`, error);
 			}
 		}
 
-		diagnosticsByFile.set(key, diagnostics);
-	}
-
-	dependencyDiagnosticsCollection.clear();
-	for (const [uriString, diagnostics] of diagnosticsByFile.entries()) {
-		dependencyDiagnosticsCollection.set(vscode.Uri.parse(uriString), diagnostics);
-	}
-
-	if (violations.length > 0) {
-		console.info(`ModuleManager detected ${violations.length} dependency violation(s).`);
+		if (violations.length > 0) {
+			console.info(`ModuleManager detected ${violations.length} dependency violation(s).`);
+		}
+	} catch (error) {
+		console.error('Failed to refresh dependency diagnostics:', error);
+		dependencyDiagnosticsCollection.clear();
 	}
 }
 

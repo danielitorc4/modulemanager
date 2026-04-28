@@ -13,5 +13,10 @@ export const CONFIG_PATHS = {
 
 export const REGEX = {
     MODULE_NAME: /^[a-zA-Z0-9-_]+$/,
-    JAVA_IMPORT: /^\s*import\s+(?:static\s+)?([a-zA-Z_][\w.]*)\s*;/gm
+    // Capture groups: (1) isStatic, (2) importPath, (3) isWildcard
+    // Examples:
+    // import com.foo.Bar;               → group 2: "com.foo.Bar"
+    // import com.foo.*;                 → group 2: "com.foo", group 3: "*"
+    // import static com.foo.Utils.method; → group 1: "static", group 2: "com.foo.Utils.method"
+    JAVA_IMPORT: /^\s*import\s+(static\s+)?([a-zA-Z_][\w.$]*)\s*;/gm
 } as const;

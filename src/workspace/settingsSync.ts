@@ -34,9 +34,12 @@ export function applyManagedRootSettings(
     moduleTypeSummary: WorkspaceModuleTypeSummary
 ): Record<string, unknown> {
     const updatedSettings = { ...currentSettings };
+    
+    // ModuleManager core settings (always set)
     updatedSettings['modulemanager.managementRoot'] = managementRootUri.fsPath;
     updatedSettings['modulemanager.mode'] = 'independent-workspaces';
 
+    // File/Search exclusions (merge, don't replace)
     updatedSettings['files.exclude'] = mergeBooleanMap(
         updatedSettings['files.exclude'],
         MANAGED_FILES_EXCLUDE_PATTERNS
@@ -46,17 +49,11 @@ export function applyManagedRootSettings(
         MANAGED_SEARCH_EXCLUDE_PATTERNS
     );
 
+    // Root folder is a management anchor, not a Java compilation root
     updatedSettings['java.import.exclusions'] = ['**'];
 
-    // Root folder is a management anchor, not a Java compilation root.
-    delete updatedSettings['java.project.sourcePaths'];
-    delete updatedSettings['java.project.outputPath'];
-    delete updatedSettings['java.project.referencedLibraries'];
-    delete updatedSettings['java.import.maven.enabled'];
-    delete updatedSettings['maven.executable.preferMavenWrapper'];
-    delete updatedSettings['java.import.gradle.enabled'];
-    delete updatedSettings['java.configuration.updateBuildConfiguration'];
-
+    // Only set Java import flags if modules of that type exist
+    // Don't disable anything - just enable what's needed
     if (moduleTypeSummary.hasMavenModules) {
         updatedSettings['java.import.maven.enabled'] = true;
     }
@@ -70,8 +67,11 @@ export function applyManagedRootSettings(
 
 export function applyManagedModuleSettings(module: ManagedModule, currentSettings: Record<string, unknown>): Record<string, unknown> {
     const updatedSettings = { ...currentSettings };
+    
+    // Module type tracking for diagnostics
     updatedSettings['modulemanager.moduleType'] = module.resolvedType;
 
+    // Exclude ModuleManager metadata
     updatedSettings['files.exclude'] = mergeBooleanMap(
         updatedSettings['files.exclude'],
         MANAGED_FILES_EXCLUDE_PATTERNS
@@ -81,32 +81,29 @@ export function applyManagedModuleSettings(module: ManagedModule, currentSetting
         MANAGED_SEARCH_EXCLUDE_PATTERNS
     );
 
-    delete updatedSettings['java.import.exclusions'];
-    delete updatedSettings['java.project.sourcePaths'];
-
+    // Handle each module type - only set what's necessary
     switch (module.resolvedType) {
         case 'basic':
+            // Basic modules use referenced libraries
             updatedSettings['java.project.referencedLibraries'] = mergeReferencedLibrariesSetting(
                 updatedSettings['java.project.referencedLibraries']
             );
-            delete updatedSettings['java.import.maven.enabled'];
-            delete updatedSettings['maven.executable.preferMavenWrapper'];
-            delete updatedSettings['java.import.gradle.enabled'];
-            delete updatedSettings['java.configuration.updateBuildConfiguration'];
+            // Don't delete Maven/Gradle settings - user might have other projects
             break;
+
         case 'maven':
-            delete updatedSettings['java.project.referencedLibraries'];
+            // Only enable Maven for this module, don't disable Gradle (user might have mixed)
             updatedSettings['java.import.maven.enabled'] = true;
             updatedSettings['maven.executable.preferMavenWrapper'] = true;
-            delete updatedSettings['java.import.gradle.enabled'];
             updatedSettings['java.configuration.updateBuildConfiguration'] = 'automatic';
+            // Don't delete referenced libraries - user might need them
             break;
+
         case 'gradle':
-            delete updatedSettings['java.project.referencedLibraries'];
-            delete updatedSettings['java.import.maven.enabled'];
-            delete updatedSettings['maven.executable.preferMavenWrapper'];
+            // Only enable Gradle for this module
             updatedSettings['java.import.gradle.enabled'] = true;
             updatedSettings['java.configuration.updateBuildConfiguration'] = 'automatic';
+            // Don't delete other settings
             break;
     }
 

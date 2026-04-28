@@ -33,6 +33,8 @@ export interface DependencyViolation {
 interface JavaImportMatch {
 	importName: string;
 	range: vscode.Range;
+	isWildcard: boolean;
+	isStaticMethod: boolean;
 }
 
 /**
@@ -308,6 +310,16 @@ export async function collectJavaDependencyViolations(workspaceUri: vscode.Uri):
 			const imports = extractJavaImportMatches(content);
 
 			for (const importMatch of imports) {
+				// Skip wildcard imports - we cannot determine which classes are imported
+				if (importMatch.isWildcard) {
+					continue;
+				}
+
+				// Skip static method imports - these are not class dependencies
+				if (importMatch.isStaticMethod) {
+					continue;
+				}
+
 				const targetModuleName = extractJavaModuleName(importMatch.importName, moduleByName);
 				if (!targetModuleName || targetModuleName === sourceModule.moduleName) {
 					continue;
@@ -559,26 +571,51 @@ function extractJavaImportMatches(source: string): JavaImportMatch[] {
 
 	REGEX.JAVA_IMPORT.lastIndex = 0;
 	while ((match = REGEX.JAVA_IMPORT.exec(source)) !== null) {
-		const importName = match[1]?.trim();
-		if (!importName) {
+		// match[1] = "static" or undefined
+		// match[2] = import path (com.foo.Bar or com.foo.* or com.foo.Outer$Inner)
+		const isStaticKeyword = !!match[1];
+		const importPath = match[2]?.trim();
+		
+		if (!importPath) {
 			continue;
 		}
 
-		if (importName.startsWith('java.') || importName.startsWith('javax.')) {
+		// Skip java.* and javax.* imports
+		if (importPath.startsWith('java.') || importPath.startsWith('javax.')) {
 			continue;
 		}
+
+		const isWildcard = importPath.endsWith('.*');
+		let importName = importPath;
+		
+		if (isWildcard) {
+			// For wildcard imports like "com.foo.*", extract the package
+			importName = importPath.slice(0, -2); // Remove ".*"
+		}
+
+		// Detect if this is a static method import (e.g., "static com.foo.Utils.method")
+		// In Java, static imports can be:
+		// - import static com.foo.Utils.method; (specific method)
+		// - import static com.foo.Utils.*; (all static members)
+		// We'll flag these as isStaticMethod if they have more than 3 segments
+		// com.foo.Utils.method has 4 segments (likely a method)
+		const segments = importName.split('.');
+		const isStaticMethod = isStaticKeyword && segments.length > 3;
 
 		const matchText = match[0] ?? '';
-		const nameIndexWithinMatch = matchText.indexOf(importName);
+		const nameIndexWithinMatch = matchText.indexOf(importPath.replace(/\.\*$/, ''));
 		if (nameIndexWithinMatch < 0) {
 			continue;
 		}
 
 		const startOffset = match.index + nameIndexWithinMatch;
 		const endOffset = startOffset + importName.length;
+		
 		matches.push({
 			importName,
-			range: new vscode.Range(offsetToPosition(source, startOffset), offsetToPosition(source, endOffset))
+			range: new vscode.Range(offsetToPosition(source, startOffset), offsetToPosition(source, endOffset)),
+			isWildcard,
+			isStaticMethod
 		});
 	}
 
@@ -594,28 +631,37 @@ function offsetToPosition(source: string, offset: number): vscode.Position {
 	return new vscode.Position(line, character);
 }
 
+/**
+ * Extracts module name from a Java import statement.
+ * Uses longest-match strategy to handle nested module packages correctly.
+ * Cache is built per-invocation to avoid stale lookups.
+ */
 export function extractJavaModuleName(
 	importSpecifier: string,
 	moduleByName: Map<string, ModuleDependency>
 ): string | null {
+	// Build a sorted list of module names by length (longest first)
+	// This ensures "core.utils" is matched before "core" for import "com.myapp.core.utils"
+	const modulesByLength = Array.from(moduleByName.keys()).sort((a, b) => b.length - a.length);
+
 	let bestMatch: string | null = null;
 	let bestScore = -1;
 
-	for (const moduleName of moduleByName.keys()) {
-		const directPrefix = `${moduleName}.`;
-		const nestedSegment = `.${moduleName}.`;
-		const isDirectMatch = importSpecifier === moduleName || importSpecifier.startsWith(directPrefix);
-		const isNestedSegmentMatch =
-			importSpecifier.includes(nestedSegment) || importSpecifier.endsWith(`.${moduleName}`);
-
-		const score = isDirectMatch ? 2 : isNestedSegmentMatch ? 1 : 0;
-		if (score === 0) {
-			continue;
+	for (const moduleName of modulesByLength) {
+		// Exact match: import name IS the module name
+		if (importSpecifier === moduleName) {
+			return moduleName;
 		}
 
-		if (score > bestScore || (score === bestScore && (!bestMatch || moduleName.length > bestMatch.length))) {
-			bestMatch = moduleName;
-			bestScore = score;
+		// Direct prefix match: import.startsWith(moduleName + ".")
+		// Example: import "com.myapp.core.User" matches module "com.myapp.core"
+		const directPrefix = `${moduleName}.`;
+		if (importSpecifier.startsWith(directPrefix)) {
+			// Verify there's a valid class name after the prefix
+			const afterPrefix = importSpecifier.slice(directPrefix.length);
+			if (afterPrefix && /^[a-zA-Z_][\w$]*$/.test(afterPrefix.split('.')[0])) {
+				return moduleName; // Return immediately since we sorted by length
+			}
 		}
 	}
 
