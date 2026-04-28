@@ -13,6 +13,7 @@ import { syncDependencyBoundaryEnforcement } from './build/dependencyBoundaryEnf
 import { CONFIG_PATHS } from './constants';
 import { shouldIgnoreModuleDescriptorPath } from './moduleDescriptors';
 import { discoverManagedModules, resolveManagementRootUri } from './workspace/managedWorkspace';
+import { ensureWorkspaceExcludes } from './workspace/settingsSync';
 
 const RECONCILE_DEBOUNCE_MS = 700;
 const DIAGNOSTIC_DEBOUNCE_MS = 700;
@@ -42,7 +43,7 @@ let hasLoggedUnavailableJavaCommands = false;
 let javaDebugSessionStartDisposable: vscode.Disposable | undefined;
 let javaRunBlockMessageCooldownUntil = 0;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
 	console.log('ModuleManager activated in independent workspace mode.');
 
 	dependencyDiagnosticsCollection = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
@@ -118,8 +119,17 @@ export function activate(context: vscode.ExtensionContext) {
 		context.subscriptions.push(javaDebugSessionStartDisposable);
 	}
 
-	scheduleReconciliation(true);
-	scheduleDependencyDiagnosticsRefresh();
+	await ensureWorkspaceExcludes();
+
+	const managementRoot = await resolveManagementRootUri();
+	const modules = managementRoot
+		? await discoverManagedModules(managementRoot)
+		: [];
+
+	if (modules.length > 0) {
+		scheduleReconciliation(true);
+		scheduleDependencyDiagnosticsRefresh();
+	}
 }
 
 async function collectViolationsForLaunch(folder?: vscode.WorkspaceFolder): Promise<DependencyViolation[]> {

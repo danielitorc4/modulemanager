@@ -198,3 +198,25 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
         return false;
     }
 }
+
+export async function ensureWorkspaceExcludes() {
+  const config = vscode.workspace.getConfiguration();
+
+  const excludes = config.get<Record<string, boolean>>('files.exclude') ?? {};
+
+  let changed = false;
+
+  if (!excludes['**/.module.json']) {
+    excludes['**/.module.json'] = true;
+    changed = true;
+  }
+
+  if (!excludes['**/*.code-workspace']) {
+    excludes['**/*.code-workspace'] = true;
+    changed = true;
+  }
+
+  if (changed) {
+    await config.update('files.exclude', excludes, vscode.ConfigurationTarget.Workspace);
+  }
+}
