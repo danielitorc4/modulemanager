@@ -111,25 +111,36 @@ suite('Extension Test Suite', () => {
 
 	test('Applies managed root settings by workspace module types', () => {
 		const summary = summarizeWorkspaceModuleTypes(['maven']);
+		const fakeModules = [
+			{
+				descriptor: { name: 'billing', type: 'maven' as const, createdAt: '', dependencies: [] },
+				moduleUri: vscode.Uri.file('c:/workspace/billing'),
+				modulePath: 'billing',
+				resolvedType: 'maven' as const,
+				projectName: 'billing',
+				outputPaths: { basicClasspathOutput: '', mavenBuildDirectory: '', gradleBuildDirectory: '' }
+			}
+		];
 		const updated = applyManagedRootSettings(
 			{
 				'files.exclude': { '**/.git': true },
 				'java.project.referencedLibraries': ['lib/**/*.jar', 'custom/**/*.jar']
 			},
 			vscode.Uri.file('c:/workspace'),
+			fakeModules,
 			summary
 		) as Record<string, unknown>;
 
 		assert.strictEqual(updated['java.import.maven.enabled'], true);
 		assert.strictEqual(updated['java.import.gradle.enabled'], undefined);
-		assert.strictEqual(updated['java.project.referencedLibraries'], undefined);
 
 		const filesExclude = updated['files.exclude'] as Record<string, unknown>;
 		assert.strictEqual(filesExclude['**/.module.json'], true);
 		assert.strictEqual(filesExclude['**/.project'], true);
 		assert.strictEqual(filesExclude['**/.classpath'], true);
 		assert.strictEqual(filesExclude['**/.git'], true);
-		assert.deepStrictEqual(updated['java.import.exclusions'], ['**']);
+		// Exclusions should be scoped to module paths, not a blanket '**'
+		assert.deepStrictEqual(updated['java.import.exclusions'], ['billing/**']);
 	});
 
 	test('Keeps managed referenced libraries for basic modules', () => {

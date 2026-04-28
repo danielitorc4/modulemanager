@@ -109,19 +109,35 @@ export async function reconcileWorkspaceLayout(
     modules: ManagedModule[]
 ): Promise<{ workspaceFileUri: vscode.Uri; workspaceFoldersChanged: boolean }> {
     const workspaceFileUri = getManagedWorkspaceFileUri(managementRootUri);
-    await syncCodeWorkspaceFile(workspaceFileUri, managementRootUri, modules);
-    const workspaceFoldersChanged = syncOpenWorkspaceFolders(managementRootUri, modules);
+    const workspaceFileExistedBefore = await fileExists(workspaceFileUri);
 
-    // If workspace folders changed, wait for JDTLS to initialize with new structure
-    // This prevents race conditions where diagnostics are sent to stale URIs
-    if (workspaceFoldersChanged) {
-        await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second grace period
+    await syncCodeWorkspaceFile(workspaceFileUri, managementRootUri, modules);
+
+    // If VS Code is NOT running from a .code-workspace file, do NOT call
+    // updateWorkspaceFolders() — that would silently convert the session into an
+    // untitled multi-root workspace and prompt the user to save it on close.
+    // Instead, offer to open the generated .code-workspace file.
+    if (!vscode.workspace.workspaceFile) {
+        if (!workspaceFileExistedBefore) {
+            const choice = await vscode.window.showInformationMessage(
+                `ModuleManager generated '${CONFIG_PATHS.CODE_WORKSPACE}'. Open it to enable full module isolation.`,
+                'Open Workspace'
+            );
+            if (choice === 'Open Workspace') {
+                await vscode.commands.executeCommand('vscode.openFolder', workspaceFileUri);
+            }
+        }
+        return { workspaceFileUri, workspaceFoldersChanged: false };
     }
 
-    return {
-        workspaceFileUri,
-        workspaceFoldersChanged
-    };
+    // Only manage workspace folders when already running inside a .code-workspace
+    const workspaceFoldersChanged = syncOpenWorkspaceFolders(managementRootUri, modules);
+    if (workspaceFoldersChanged) {
+        // Brief grace period for JDTLS to reinitialize after folder changes
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    return { workspaceFileUri, workspaceFoldersChanged };
 }
 
 export function getManagedWorkspaceFileUri(managementRootUri: vscode.Uri): vscode.Uri {
@@ -143,13 +159,12 @@ export async function resolveModuleType(moduleUri: vscode.Uri): Promise<ModuleTy
 }
 
 function buildProjectName(modulePath: string): string {
-    const normalizedPath = modulePath
-        .replace(/\\/g, '/')
-        .replace(/^\.\//, '')
-        .replace(/\//g, '.')
-        .replace(/[^a-zA-Z0-9._-]/g, '_');
-
-    return `modulemanager.${normalizedPath || 'module'}`;
+    // Use only the folder name, not a prefixed path.
+    // If .project name differs from the workspace folder name, JDTLS shows
+    // the module twice in the Java Projects view (once per identifier).
+    const normalizedPath = modulePath.replace(/\\/g, '/').replace(/^\.\//, '');
+    const lastSegment = normalizedPath.split('/').filter(Boolean).pop() ?? normalizedPath;
+    return lastSegment.replace(/[^a-zA-Z0-9._-]/g, '_') || 'module';
 }
 
 function buildModuleOutputPaths(moduleName: string): ModuleOutputPaths {
@@ -171,11 +186,10 @@ async function syncCodeWorkspaceFile(
     modules: ManagedModule[]
 ): Promise<void> {
     const existing = await readCodeWorkspaceFile(workspaceFileUri);
+    // Root folder has no explicit name override — VS Code shows the real directory name.
+    // Adding a synthetic name like "modulemanager-root" causes confusion in the UI.
     const folders: WorkspaceFolderEntry[] = [
-        {
-            name: MANAGED_ROOT_FOLDER_NAME,
-            path: '.'
-        },
+        { path: '.' },
         ...modules.map(module => ({
             name: module.descriptor.name,
             path: module.modulePath
@@ -222,11 +236,9 @@ async function readCodeWorkspaceFile(workspaceFileUri: vscode.Uri): Promise<Code
 }
 
 function syncOpenWorkspaceFolders(managementRootUri: vscode.Uri, modules: ManagedModule[]): boolean {
+    // Root folder has no name override — keeps its real filesystem name in the UI.
     const desiredFolders: Array<{ uri: vscode.Uri; name?: string }> = [
-        {
-            uri: managementRootUri,
-            name: MANAGED_ROOT_FOLDER_NAME
-        },
+        { uri: managementRootUri },
         ...modules.map(module => ({
             uri: module.moduleUri,
             name: module.descriptor.name

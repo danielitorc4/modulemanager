@@ -22,7 +22,7 @@ export async function syncDistributedWorkspaceSettings(
     modules: ManagedModule[],
     moduleTypeSummary: WorkspaceModuleTypeSummary
 ): Promise<void> {
-    await syncRootSettings(managementRootUri, moduleTypeSummary);
+    await syncRootSettings(managementRootUri, modules, moduleTypeSummary);
     for (const module of modules) {
         await syncModuleSettings(module);
     }
@@ -31,10 +31,11 @@ export async function syncDistributedWorkspaceSettings(
 export function applyManagedRootSettings(
     currentSettings: Record<string, unknown>,
     managementRootUri: vscode.Uri,
+    modules: ManagedModule[],
     moduleTypeSummary: WorkspaceModuleTypeSummary
 ): Record<string, unknown> {
     const updatedSettings = { ...currentSettings };
-    
+
     // ModuleManager core settings (always set)
     updatedSettings['modulemanager.managementRoot'] = managementRootUri.fsPath;
     updatedSettings['modulemanager.mode'] = 'independent-workspaces';
@@ -49,11 +50,18 @@ export function applyManagedRootSettings(
         MANAGED_SEARCH_EXCLUDE_PATTERNS
     );
 
-    // Root folder is a management anchor, not a Java compilation root
-    updatedSettings['java.import.exclusions'] = ['**'];
+    // Exclude only the managed module subdirectories from JDTLS import scanning at
+    // the root level. This prevents double-indexing (the modules have their own
+    // workspace folder entries), while leaving any pre-existing src/ or other Java
+    // source trees in the root folder fully visible to JDTLS.
+    if (modules.length > 0) {
+        updatedSettings['java.import.exclusions'] = modules.map(m => `${m.modulePath}/**`);
+    } else {
+        // No modules yet — remove any stale exclusion so the root src/ is discoverable
+        delete updatedSettings['java.import.exclusions'];
+    }
 
     // Only set Java import flags if modules of that type exist
-    // Don't disable anything - just enable what's needed
     if (moduleTypeSummary.hasMavenModules) {
         updatedSettings['java.import.maven.enabled'] = true;
     }
@@ -133,10 +141,11 @@ function mergeReferencedLibrariesSetting(currentValue: unknown): unknown {
 
 async function syncRootSettings(
     managementRootUri: vscode.Uri,
+    modules: ManagedModule[],
     moduleTypeSummary: WorkspaceModuleTypeSummary
 ): Promise<void> {
     const current = await readSettingsFile(managementRootUri);
-    const updated = applyManagedRootSettings(current, managementRootUri, moduleTypeSummary);
+    const updated = applyManagedRootSettings(current, managementRootUri, modules, moduleTypeSummary);
     await writeSettingsFile(managementRootUri, updated);
 }
 
