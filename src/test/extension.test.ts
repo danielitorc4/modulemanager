@@ -182,7 +182,7 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(updated['maven.executable.preferMavenWrapper'], undefined);
 	});
 
-	test('Marks declared workspace modules accessible and undeclared ones blocked in classpath access rules', () => {
+	test('Classpath access entries cover only declared workspace dependencies', () => {
 		const workspaceUri = vscode.Uri.file('c:/workspace');
 		const module = {
 			descriptor: {
@@ -241,9 +241,12 @@ suite('Extension Test Suite', () => {
 
 		const accessEntries = resolveClasspathAccessEntries(workspaceUri, module as any, allModules);
 
+		// Inventory is not a declared dependency — it must NOT appear on the
+		// classpath, otherwise Eclipse treats it as a build-path reference and
+		// flags a cycle when inventory itself is regenerated with orders on
+		// its own classpath.
 		assert.deepStrictEqual(accessEntries, [
-			{ projectPath: '/modulemanager.billing', accessRuleKind: 'accessible' },
-			{ projectPath: '/modulemanager.inventory', accessRuleKind: 'non-accessible' }
+			{ projectPath: '/modulemanager.billing', accessRuleKind: 'accessible' }
 		]);
 	});
 });

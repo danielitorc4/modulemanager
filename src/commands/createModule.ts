@@ -8,10 +8,16 @@ import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescripto
 import { buildGradleTemplate, pomTemplate } from '../build/templates';
 import { precheckMavenModule } from '../build/mavenPrecheck';
 import { resolveManagementRootUri } from '../workspace/managedWorkspace';
+import { convertRootCodeToModule, describeRootState, promptForMigration } from '../workspace/rootMigration';
 
 export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
     const managementRootUri = await resolveManagementRootUri(resourceUri);
     if (!managementRootUri) {
+        return null;
+    }
+
+    const migrationOutcome = await runRootMigrationIfNeeded(managementRootUri);
+    if (migrationOutcome === 'cancelled') {
         return null;
     }
 
@@ -81,7 +87,15 @@ export async function createModule(resourceUri?: vscode.Uri): Promise<vscode.Uri
         };
 
         await writeModuleDescriptor(moduleUri, descriptor);
-        await reconcileWorkspaceModel(moduleUri);
+
+        // Reconcile separately: if VS Code reloads (e.g. to open the generated
+        // .code-workspace file) this step may be cancelled, but the module was
+        // already written successfully and will reconcile on next activation.
+        try {
+            await reconcileWorkspaceModel(moduleUri);
+        } catch (reconcileError) {
+            console.warn(`Post-creation reconciliation was interrupted for "${moduleName}". It will run again on next activation.`, reconcileError);
+        }
 
         vscode.window.showInformationMessage(`Module "${moduleName}" created successfully.`);
         return moduleUri;
@@ -177,6 +191,35 @@ async function runMavenPrecheck(moduleUri: vscode.Uri, workspaceUri: vscode.Uri)
     }
 }
 
+async function runRootMigrationIfNeeded(
+    managementRootUri: vscode.Uri
+): Promise<'migrated' | 'not-needed' | 'cancelled'> {
+    const state = await describeRootState(managementRootUri);
+    // Only auto-migrate when the root has loose Java AND the user has not yet
+    // explicitly declared the root as a module. If a root descriptor exists,
+    // the user is already handling the layout deliberately — we leave it alone.
+    if (!state.rootHasLooseJava || state.hasRootDescriptor) {
+        return 'not-needed';
+    }
+
+    const moduleName = await promptForMigration(managementRootUri, /* modal */ true);
+    if (!moduleName) {
+        return 'cancelled';
+    }
+
+    try {
+        await convertRootCodeToModule(managementRootUri, moduleName);
+        vscode.window.showInformationMessage(
+            `Existing root code was moved into module "${moduleName}".`
+        );
+        return 'migrated';
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        vscode.window.showErrorMessage(`Failed to migrate root code: ${message}`);
+        return 'cancelled';
+    }
+}
+
 async function fileExists(uri: vscode.Uri): Promise<boolean> {
     try {
         await vscode.workspace.fs.stat(uri);
@@ -185,3 +228,4 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
         return false;
     }
 }
+

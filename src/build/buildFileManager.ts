@@ -32,6 +32,15 @@ export async function reconcileWorkspaceModel(resourceUri?: vscode.Uri): Promise
     const layout = await reconcileWorkspaceLayout(managementRootUri, modules);
     await syncDistributedWorkspaceSettings(managementRootUri, modules, moduleTypeSummary);
 
+    // If the workspace root is no longer a managed Java module, strip any stale
+    // Eclipse metadata that a previous extension version (or JDTLS auto-import)
+    // left behind. Otherwise JDTLS treats the root as a parent project nested
+    // around the child module projects and refuses to load them cleanly.
+    const rootIsManagedModule = modules.some(module => module.modulePath === '.');
+    if (!rootIsManagedModule) {
+        await eclipseMetadataManager.removeEclipseMetadata(managementRootUri);
+    }
+
     for (const module of modules) {
         await syncSingleModule(managementRootUri, module, modules);
     }

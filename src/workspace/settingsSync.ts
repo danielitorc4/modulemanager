@@ -24,6 +24,12 @@ export async function syncDistributedWorkspaceSettings(
 ): Promise<void> {
     await syncRootSettings(managementRootUri, modules, moduleTypeSummary);
     for (const module of modules) {
+        // The root module's settings are owned entirely by syncRootSettings above.
+        // Running applyManagedModuleSettings on it would delete java.import.exclusions
+        // that syncRootSettings just wrote for JDTLS boundary enforcement.
+        if (module.modulePath === '.') {
+            continue;
+        }
         await syncModuleSettings(module);
     }
 }
@@ -53,15 +59,29 @@ export function applyManagedRootSettings(
         MANAGED_SEARCH_EXCLUDE_PATTERNS
     );
 
-    // Exclude only the managed module subdirectories from JDTLS import scanning at
-    // the root level. This prevents double-indexing (the modules have their own
-    // workspace folder entries), while leaving any pre-existing src/ or other Java
-    // source trees in the root folder fully visible to JDTLS.
-    if (modules.length > 0) {
-        updatedSettings['java.import.exclusions'] = modules.map(m => `${m.modulePath}/**`);
+    const childModules = modules.filter(m => m.modulePath !== '.');
+    const rootIsManagedModule = modules.some(m => m.modulePath === '.');
+
+    if (childModules.length > 0) {
+        // Exclude managed module subdirectories from JDTLS import scanning at the
+        // root level. Each child module has its own workspace folder, so JDTLS
+        // imports them through that path — re-importing them as children of the
+        // root project causes "overlapping project" errors.
+        updatedSettings['java.import.exclusions'] = childModules.map(m => `${m.modulePath}/**`);
     } else {
         // No modules yet — remove any stale exclusion so the root src/ is discoverable
         delete updatedSettings['java.import.exclusions'];
+    }
+
+    if (!rootIsManagedModule) {
+        // The root is a container, not a Java module. Strip the per-project
+        // settings JDTLS auto-writes on first open — they conflict with the
+        // .classpath in each child module and with java.import.exclusions above,
+        // and they cause JDTLS to treat the root as an "invisible project" that
+        // overlaps with the child Eclipse projects.
+        delete updatedSettings['java.project.sourcePaths'];
+        delete updatedSettings['java.project.outputPath'];
+        delete updatedSettings['java.project.referencedLibraries'];
     }
 
     // Only set Java import flags if modules of that type exist
@@ -81,6 +101,11 @@ export function applyManagedModuleSettings(module: ManagedModule, currentSetting
     
     // Module type tracking for diagnostics
     updatedSettings['modulemanager.moduleType'] = module.resolvedType;
+
+    // The .classpath file is the authoritative source of source paths for managed modules.
+    // Remove any settings-based override so JDTLS doesn't silently add sibling module
+    // source directories back into this module's project.
+    delete updatedSettings['java.project.sourcePaths'];
 
     // Exclude ModuleManager metadata
     updatedSettings['files.exclude'] = mergeBooleanMap(
@@ -182,8 +207,26 @@ async function readSettingsFile(baseUri: vscode.Uri): Promise<Record<string, unk
 async function writeSettingsFile(baseUri: vscode.Uri, settings: Record<string, unknown>): Promise<void> {
     const vscodeDirUri = vscode.Uri.joinPath(baseUri, CONFIG_PATHS.VSCODE_DIR);
     const settingsUri = vscode.Uri.joinPath(vscodeDirUri, CONFIG_PATHS.SETTINGS_JSON);
-    await vscode.workspace.fs.createDirectory(vscodeDirUri);
-    await vscode.workspace.fs.writeFile(settingsUri, Buffer.from(JSON.stringify(settings, null, 2)));
+    try {
+        await vscode.workspace.fs.createDirectory(vscodeDirUri);
+        await vscode.workspace.fs.writeFile(settingsUri, Buffer.from(JSON.stringify(settings, null, 2)));
+    } catch (error) {
+        // VS Code cancels in-flight file system operations when the window reloads
+        // (e.g. when the user opens the generated .code-workspace file). Treat this
+        // as a non-fatal race: the settings will be written on the next reconciliation.
+        if (isCanceledError(error)) {
+            console.info(`Settings write to ${settingsUri.fsPath} was cancelled (likely a VS Code reload). Will retry on next reconciliation.`);
+            return;
+        }
+        throw error;
+    }
+}
+
+function isCanceledError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+        return false;
+    }
+    return error.name.includes('Canceled') || error.message.includes('Canceled');
 }
 
 function mergeBooleanMap(current: unknown, patterns: string[]): JsonObject {

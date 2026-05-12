@@ -95,7 +95,11 @@ async function writeClasspathFile(
     projectNameByModule: Map<string, string>
 ): Promise<void> {
     const classpathUri = vscode.Uri.joinPath(module.moduleUri, CONFIG_PATHS.ECLIPSE_CLASSPATH);
-    const sourceEntries = await resolveClasspathSourceEntries(module.moduleUri);
+
+    const siblingModuleUris = allModules
+        .filter(m => m.moduleUri.fsPath !== module.moduleUri.fsPath)
+        .map(m => m.moduleUri);
+    const sourceEntries = await resolveClasspathSourceEntries(module.moduleUri, siblingModuleUris);
 
     const accessEntries = resolveClasspathAccessEntries(workspaceUri, module, allModules, projectNameByModule).map(entry => [
         `  <classpathentry kind="src" path="${escapeXml(entry.projectPath)}" combineaccessrules="false">`,
@@ -134,8 +138,21 @@ export function resolveClasspathAccessEntries(
     const declaredDependencies = new Set(module.descriptor.dependencies);
     const entries: ClasspathAccessEntry[] = [];
 
+    // Only emit classpath references for modules this module DECLARES as
+    // dependencies. Undeclared modules are intentionally left out — adding a
+    // `non-accessible` entry would still register an Eclipse build-path
+    // dependency, which makes JDTLS report a classpath cycle as soon as the
+    // other side declares us back. The boundary enforcement we want for
+    // undeclared usage already comes from:
+    //   1. our own VS Code diagnostics on imports/FQN references,
+    //   2. the generated blocker class that breaks `javac`,
+    //   3. the natural "type cannot be resolved" error JDTLS produces when the
+    //      referenced class is simply not on the classpath.
     for (const dependency of allModules) {
         if (dependency.moduleUri.fsPath === module.moduleUri.fsPath || dependency.resolvedType !== 'basic') {
+            continue;
+        }
+        if (!declaredDependencies.has(dependency.descriptor.name)) {
             continue;
         }
 
@@ -144,13 +161,9 @@ export function resolveClasspathAccessEntries(
             continue;
         }
 
-        const accessRuleKind: ClasspathAccessEntry['accessRuleKind'] = declaredDependencies.has(dependency.descriptor.name)
-            ? 'accessible'
-            : 'non-accessible';
-
         entries.push({
             projectPath: `/${projectName}`,
-            accessRuleKind
+            accessRuleKind: 'accessible'
         });
     }
 
@@ -173,9 +186,9 @@ async function writeJdtCompilerPrefsFile(moduleUri: vscode.Uri): Promise<void> {
     await vscode.workspace.fs.writeFile(prefsUri, Buffer.from(JDT_CORE_PREFS_CONTENT));
 }
 
-async function resolveClasspathSourceEntries(moduleUri: vscode.Uri): Promise<string[]> {
+async function resolveClasspathSourceEntries(moduleUri: vscode.Uri, siblingModuleUris: vscode.Uri[] = []): Promise<string[]> {
     const configuredSourcePaths = getConfiguredJavaSourcePaths(moduleUri);
-    const discoveredSourcePaths = await discoverJavaSourceRoots(moduleUri);
+    const discoveredSourcePaths = await discoverJavaSourceRoots(moduleUri, siblingModuleUris);
 
     const existingConfiguredPaths: string[] = [];
     for (const sourcePath of configuredSourcePaths) {
@@ -213,7 +226,12 @@ function getConfiguredJavaSourcePaths(moduleUri: vscode.Uri): string[] {
         .filter(entry => entry !== '' && entry !== '.');
 }
 
-async function discoverJavaSourceRoots(moduleUri: vscode.Uri): Promise<string[]> {
+async function discoverJavaSourceRoots(moduleUri: vscode.Uri, siblingModuleUris: vscode.Uri[] = []): Promise<string[]> {
+    // Compute relative paths of sibling modules so we can skip their .java files.
+    const siblingRelPaths = siblingModuleUris
+        .map(uri => normalizeRelativePath(path.relative(moduleUri.fsPath, uri.fsPath)))
+        .filter(rel => rel !== '' && !rel.startsWith('..'));
+
     const javaFiles = await vscode.workspace.findFiles(
         new vscode.RelativePattern(moduleUri, '**/*.java'),
         JAVA_DISCOVERY_EXCLUDES
@@ -221,6 +239,16 @@ async function discoverJavaSourceRoots(moduleUri: vscode.Uri): Promise<string[]>
 
     const roots = new Set<string>();
     for (const javaFile of javaFiles) {
+        const relativeFilePath = normalizeRelativePath(path.relative(moduleUri.fsPath, javaFile.fsPath));
+
+        // Skip files that live inside a sibling module's subtree.
+        const inSiblingModule = siblingRelPaths.some(
+            siblingPath => relativeFilePath === siblingPath || relativeFilePath.startsWith(siblingPath + '/')
+        );
+        if (inSiblingModule) {
+            continue;
+        }
+
         roots.add(await inferSourceRootFromJavaFile(moduleUri, javaFile));
     }
 

@@ -19,6 +19,19 @@ interface CodeWorkspaceFile {
 const MANAGED_ROOT_FOLDER_NAME = 'modulemanager-root';
 const MANAGEMENT_ROOT_CONFIG_KEY = 'managementRoot';
 let hasPromptedToOpenManagedWorkspaceInSession = false;
+let hasWarnedAboutNestedRootInSession = false;
+
+function warnAboutNestedRootOnce(): void {
+    if (hasWarnedAboutNestedRootInSession) {
+        return;
+    }
+    hasWarnedAboutNestedRootInSession = true;
+    vscode.window.showWarningMessage(
+        'ModuleManager: the workspace root has its own .module.json but child modules also exist. ' +
+        'JDTLS does not allow nested Java projects — the root will be treated as a container only. ' +
+        'Either delete the root .module.json or remove the child modules.'
+    );
+}
 
 export async function resolveManagementRootUri(resourceUri?: vscode.Uri): Promise<vscode.Uri | null> {
     const workspaceFile = vscode.workspace.workspaceFile;
@@ -67,12 +80,10 @@ export async function discoverManagedModules(managementRootUri: vscode.Uri): Pro
     const discovered = await findModuleDescriptors(managementRootUri);
     const modules: ManagedModule[] = [];
 
-    for (const module of discovered) {
-        if (!module.modulePath || module.modulePath === '.') {
-            console.warn(`Skipping module descriptor at workspace root: ${module.moduleUri.fsPath}`);
-            continue;
-        }
+    const rootExplicit = discovered.find(m => !m.modulePath || m.modulePath === '.');
+    const childDescriptors = discovered.filter(m => m.modulePath && m.modulePath !== '.');
 
+    for (const module of childDescriptors) {
         const resolvedType = await resolveModuleType(module.moduleUri);
         const normalizedDescriptor = module.descriptor.type === resolvedType
             ? module.descriptor
@@ -92,6 +103,35 @@ export async function discoverManagedModules(managementRootUri: vscode.Uri): Pro
             projectName: buildProjectName(module.modulePath),
             outputPaths: buildModuleOutputPaths(normalizedDescriptor.name)
         });
+    }
+
+    // The workspace root becomes a Java module only when:
+    //   - the user has explicitly placed a .module.json at the root, AND
+    //   - there are no child modules.
+    // Mixing a root-level Java project with child Java projects creates nested
+    // Eclipse projects, which JDTLS does not support — it triggers "overlapping
+    // project" errors and cyclic classpath references between parent/child.
+    if (rootExplicit && childDescriptors.length === 0) {
+        const rootFolderName = path.basename(managementRootUri.fsPath);
+        const rootResolvedType = await resolveModuleType(managementRootUri);
+        const rootDescriptor: ModuleConfig = rootExplicit.descriptor.type === rootResolvedType
+            ? rootExplicit.descriptor
+            : { ...rootExplicit.descriptor, type: rootResolvedType };
+
+        if (rootDescriptor.type !== rootExplicit.descriptor.type) {
+            await writeModuleDescriptor(managementRootUri, rootDescriptor);
+        }
+
+        modules.unshift({
+            modulePath: '.',
+            moduleUri: managementRootUri,
+            descriptor: rootDescriptor,
+            resolvedType: rootDescriptor.type,
+            projectName: buildProjectName(rootFolderName),
+            outputPaths: buildModuleOutputPaths(rootDescriptor.name)
+        });
+    } else if (rootExplicit && childDescriptors.length > 0) {
+        warnAboutNestedRootOnce();
     }
 
     return modules.sort((left, right) => left.modulePath.localeCompare(right.modulePath));
@@ -187,19 +227,33 @@ async function syncCodeWorkspaceFile(
     modules: ManagedModule[]
 ): Promise<void> {
     const existing = await readCodeWorkspaceFile(workspaceFileUri);
-    // Root folder has no explicit name override — VS Code shows the real directory name.
-    // Adding a synthetic name like "modulemanager-root" causes confusion in the UI.
-    const folders: WorkspaceFolderEntry[] = [
-        { path: '.' },
-        ...modules.map(module => ({
+    const childModules = modules.filter(m => m.modulePath !== '.');
+
+    // When child modules exist, omit the root from the workspace-folder list.
+    // The root is then an implicit container: JDTLS only sees the per-module
+    // workspace folders, so the Java Projects view shows each module as a
+    // sibling instead of nesting them inside a "mm-test" parent that duplicates
+    // every module entry.
+    // Fall back to including the root only when there are no managed modules —
+    // that's the bootstrap case where the user has a plain Java project at the
+    // root and we still want them to see their code.
+    const folders: WorkspaceFolderEntry[] = childModules.length > 0
+        ? childModules.map(module => ({
             name: module.descriptor.name,
             path: module.modulePath
         }))
-    ];
+        : [{ path: '.' }];
 
     const settings = asRecord(existing.settings);
     settings['modulemanager.managementRoot'] = managementRootUri.fsPath;
     settings['modulemanager.mode'] = 'independent-workspaces';
+
+    // Do NOT set java.import.exclusions here at workspace scope: a workspace-level
+    // exclusion would also suppress JDTLS scanning inside each module's own workspace
+    // folder.  Per-folder exclusions in mm-test/.vscode/settings.json (written by
+    // applyManagedRootSettings) are the right mechanism — they apply only when JDTLS
+    // is scanning the root folder, not when it scans the dedicated module folders.
+    delete settings['java.import.exclusions'];
 
     const nextWorkspace: CodeWorkspaceFile = {
         ...existing,
@@ -237,14 +291,18 @@ async function readCodeWorkspaceFile(workspaceFileUri: vscode.Uri): Promise<Code
 }
 
 function syncOpenWorkspaceFolders(managementRootUri: vscode.Uri, modules: ManagedModule[]): boolean {
-    // Root folder has no name override — keeps its real filesystem name in the UI.
-    const desiredFolders: Array<{ uri: vscode.Uri; name?: string }> = [
-        { uri: managementRootUri },
-        ...modules.map(module => ({
+    const childModules = modules.filter(m => m.modulePath !== '.');
+
+    // Mirror syncCodeWorkspaceFile: when child modules exist, the running
+    // VS Code window should show ONLY the module folders — the root is hidden
+    // to keep JDTLS's Java Projects view free of the duplicate nested entries
+    // (one per workspace folder + one nested inside the root).
+    const desiredFolders: Array<{ uri: vscode.Uri; name?: string }> = childModules.length > 0
+        ? childModules.map(module => ({
             uri: module.moduleUri,
             name: module.descriptor.name
         }))
-    ];
+        : [{ uri: managementRootUri }];
 
     const currentFolders = vscode.workspace.workspaceFolders ?? [];
     if (areWorkspaceFoldersEqual(currentFolders, desiredFolders)) {
@@ -275,7 +333,10 @@ function areWorkspaceFoldersEqual(
             return false;
         }
 
-        if ((current.name ?? '') !== (desired.name ?? '')) {
+        // Only treat this as a mismatch when the desired entry explicitly sets a name.
+        // If desired.name is undefined the folder keeps VS Code's auto-assigned name
+        // (the real directory name), so there is nothing to change.
+        if (desired.name !== undefined && current.name !== desired.name) {
             return false;
         }
     }

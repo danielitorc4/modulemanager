@@ -14,6 +14,7 @@ import { CONFIG_PATHS } from './constants';
 import { shouldIgnoreModuleDescriptorPath } from './moduleDescriptors';
 import { discoverManagedModules, resolveManagementRootUri } from './workspace/managedWorkspace';
 import { ensureWorkspaceExcludes } from './workspace/settingsSync';
+import { convertRootCodeToModule, describeRootState, promptForMigration } from './workspace/rootMigration';
 
 const RECONCILE_DEBOUNCE_MS = 700;
 const DIAGNOSTIC_DEBOUNCE_MS = 700;
@@ -50,6 +51,7 @@ let dependencyDiagnosticsCollection: vscode.DiagnosticCollection | undefined;
 let javaCommandsCache: { hasReload: boolean; hasClean: boolean; checkedAt: number } | undefined;
 let javaDebugSessionStartDisposable: vscode.Disposable | undefined;
 let javaRunBlockMessageCooldownUntil = 0;
+let hasOfferedRootMigrationInSession = false;
 
 /**
  * Validates that the Java extension (JDTLS) is available and responding.
@@ -211,6 +213,44 @@ export async function activate(context: vscode.ExtensionContext) {
 	if (modules.length > 0) {
 		scheduleReconciliation(true);
 		scheduleDependencyDiagnosticsRefresh();
+	}
+
+	if (managementRoot) {
+		void offerRootMigrationIfNeeded(managementRoot);
+	}
+}
+
+async function offerRootMigrationIfNeeded(managementRootUri: vscode.Uri): Promise<void> {
+	if (hasOfferedRootMigrationInSession) {
+		return;
+	}
+
+	const state = await describeRootState(managementRootUri);
+	// Only offer migration when:
+	//   - the root has loose .java files (so JDTLS will flag them as non-project), and
+	//   - at least one child module already exists (the user has committed to the
+	//     multi-module layout), and
+	//   - the root is not itself a declared module (we would not own that code).
+	if (!state.rootHasLooseJava || !state.hasChildModules || state.hasRootDescriptor) {
+		return;
+	}
+
+	hasOfferedRootMigrationInSession = true;
+	const moduleName = await promptForMigration(managementRootUri, /* modal */ false);
+	if (!moduleName) {
+		return;
+	}
+
+	try {
+		await convertRootCodeToModule(managementRootUri, moduleName);
+		vscode.window.showInformationMessage(
+			`Existing root code was moved into module "${moduleName}".`
+		);
+		scheduleReconciliation(true);
+		scheduleDependencyDiagnosticsRefresh();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		vscode.window.showErrorMessage(`Failed to migrate root code: ${message}`);
 	}
 }
 

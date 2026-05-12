@@ -37,6 +37,11 @@ interface JavaImportMatch {
 	isStaticMethod: boolean;
 }
 
+interface ModuleClassIndex {
+	bySimpleName: Map<string, Set<string>>;
+	byFullyQualifiedName: Map<string, string>;
+}
+
 /**
  * Adds a dependency from one module to another.
  */
@@ -298,12 +303,42 @@ export async function collectJavaDependencyViolations(workspaceUri: vscode.Uri):
 		moduleByName.set(module.moduleName, module);
 	}
 
+	const filesByModule = new Map<string, vscode.Uri[]>();
+	for (const module of modules) {
+		const sourceRootUri = vscode.Uri.file(path.join(workspaceUri.fsPath, module.modulePath));
+		const pattern = new vscode.RelativePattern(sourceRootUri, 'src/**/*.java');
+		filesByModule.set(module.moduleName, await vscode.workspace.findFiles(pattern));
+	}
+
+	const classIndex = await buildModuleClassIndex(modules, filesByModule);
+
 	const violations: DependencyViolation[] = [];
+	const seenKeys = new Set<string>();
+
+	const recordViolation = (
+		file: vscode.Uri,
+		importName: string,
+		sourceModule: ModuleDependency,
+		targetModule: ModuleDependency,
+		range: vscode.Range
+	): void => {
+		const key = `${file.toString()}::${sourceModule.moduleName}::${targetModule.moduleName}::${importName}::${range.start.line}:${range.start.character}`;
+		if (seenKeys.has(key)) {
+			return;
+		}
+		seenKeys.add(key);
+		violations.push({
+			fileUri: file,
+			importName,
+			sourceModule: sourceModule.moduleName,
+			sourceModulePath: sourceModule.modulePath,
+			targetModule: targetModule.moduleName,
+			range
+		});
+	};
 
 	for (const sourceModule of modules) {
-		const sourceRootUri = vscode.Uri.file(path.join(workspaceUri.fsPath, sourceModule.modulePath));
-		const pattern = new vscode.RelativePattern(sourceRootUri, 'src/**/*.java');
-		const files = await vscode.workspace.findFiles(pattern);
+		const files = filesByModule.get(sourceModule.moduleName) ?? [];
 
 		for (const file of files) {
 			const content = Buffer.from(await vscode.workspace.fs.readFile(file)).toString();
@@ -320,7 +355,12 @@ export async function collectJavaDependencyViolations(workspaceUri: vscode.Uri):
 					continue;
 				}
 
-				const targetModuleName = extractJavaModuleName(importMatch.importName, moduleByName);
+				const targetModuleName = resolveTargetModule(
+					importMatch.importName,
+					moduleByName,
+					classIndex,
+					sourceModule.moduleName
+				);
 				if (!targetModuleName || targetModuleName === sourceModule.moduleName) {
 					continue;
 				}
@@ -330,14 +370,25 @@ export async function collectJavaDependencyViolations(workspaceUri: vscode.Uri):
 					continue;
 				}
 
-				violations.push({
-					fileUri: file,
-					importName: importMatch.importName,
-					sourceModule: sourceModule.moduleName,
-					sourceModulePath: sourceModule.modulePath,
-					targetModule: targetModule.moduleName,
-					range: importMatch.range
-				});
+				recordViolation(file, importMatch.importName, sourceModule, targetModule, importMatch.range);
+			}
+
+			// Also flag fully-qualified cross-module references that appear in
+			// code without a matching import statement. Eclipse's access-rule
+			// enforcement on the classpath is the authoritative check, but
+			// JDTLS does not always propagate forbidden-reference diagnostics to
+			// VS Code, so we publish our own and rely on the boundary blocker
+			// file to break the build.
+			const fqnReferences = extractFullyQualifiedCrossModuleReferences(content, moduleByName, sourceModule.moduleName);
+			for (const reference of fqnReferences) {
+				if (sourceModule.dependencies.includes(reference.targetModuleName)) {
+					continue;
+				}
+				const targetModule = moduleByName.get(reference.targetModuleName);
+				if (!targetModule) {
+					continue;
+				}
+				recordViolation(file, reference.importName, sourceModule, targetModule, reference.range);
 			}
 		}
 	}
@@ -550,19 +601,244 @@ export function extractJavaImportSpecifiers(source: string): string[] {
 
 	REGEX.JAVA_IMPORT.lastIndex = 0;
 	while ((match = REGEX.JAVA_IMPORT.exec(source)) !== null) {
-		const importName = match[1]?.trim();
-		if (!importName) {
+		// match[1] = "static " or undefined, match[2] = the actual import path
+		const importPath = match[2]?.trim();
+		if (!importPath) {
 			continue;
 		}
 
-		if (importName.startsWith('java.') || importName.startsWith('javax.')) {
+		if (importPath.startsWith('java.') || importPath.startsWith('javax.')) {
 			continue;
 		}
 
+		// Strip wildcard suffix so module-name extraction works on "com.foo.*"
+		const importName = importPath.endsWith('.*') ? importPath.slice(0, -2) : importPath;
 		specifiers.add(importName);
 	}
 
 	return Array.from(specifiers);
+}
+
+interface FullyQualifiedCrossModuleReference {
+	importName: string;
+	targetModuleName: string;
+	range: vscode.Range;
+}
+
+const JAVA_PACKAGE_DECLARATION_REGEX = /^\s*package\s+([a-zA-Z_][\w.]*)\s*;/m;
+const JAVA_TYPE_DECLARATION_REGEX = /(?:^|[\s;{}])(?:public\s+|private\s+|protected\s+|abstract\s+|final\s+|sealed\s+|non-sealed\s+|static\s+|strictfp\s+|@interface\s+)*(?:class|interface|enum|record)\s+([A-Za-z_][\w$]*)/g;
+
+async function buildModuleClassIndex(
+	modules: ModuleDependency[],
+	filesByModule: Map<string, vscode.Uri[]>
+): Promise<ModuleClassIndex> {
+	const bySimpleName = new Map<string, Set<string>>();
+	const byFullyQualifiedName = new Map<string, string>();
+
+	for (const module of modules) {
+		const files = filesByModule.get(module.moduleName) ?? [];
+		for (const file of files) {
+			const raw = Buffer.from(await vscode.workspace.fs.readFile(file)).toString();
+			const sanitized = stripJavaCommentsAndStrings(raw);
+
+			const packageMatch = sanitized.match(JAVA_PACKAGE_DECLARATION_REGEX);
+			const packageName = packageMatch?.[1] ?? '';
+
+			JAVA_TYPE_DECLARATION_REGEX.lastIndex = 0;
+			let typeMatch: RegExpExecArray | null;
+			while ((typeMatch = JAVA_TYPE_DECLARATION_REGEX.exec(sanitized)) !== null) {
+				const simpleName = typeMatch[1];
+				if (!simpleName) {
+					continue;
+				}
+
+				const fullyQualifiedName = packageName ? `${packageName}.${simpleName}` : simpleName;
+
+				const owners = bySimpleName.get(simpleName) ?? new Set<string>();
+				owners.add(module.moduleName);
+				bySimpleName.set(simpleName, owners);
+
+				// First declaration wins for FQN — duplicates would be a compile
+				// error anyway and would not be silently swapped.
+				if (!byFullyQualifiedName.has(fullyQualifiedName)) {
+					byFullyQualifiedName.set(fullyQualifiedName, module.moduleName);
+				}
+			}
+		}
+	}
+
+	return { bySimpleName, byFullyQualifiedName };
+}
+
+function resolveTargetModule(
+	importSpec: string,
+	moduleByName: Map<string, ModuleDependency>,
+	classIndex: ModuleClassIndex,
+	sourceModuleName: string
+): string | null {
+	// Convention-based prefix match still wins when it works — keeps the legacy
+	// "package starts with module name" behaviour intact for projects that
+	// follow it.
+	const prefixMatch = extractJavaModuleName(importSpec, moduleByName);
+	if (prefixMatch && prefixMatch !== sourceModuleName) {
+		return prefixMatch;
+	}
+
+	// Authoritative match: a class declared inside another module is owned by
+	// that module regardless of which package the file happens to declare. This
+	// catches files placed in unconventional packages — including JDTLS
+	// path-inferred packages like `main.java.Foo` when the .classpath source
+	// root was guessed wrong by an external tool.
+	const fqnOwner = classIndex.byFullyQualifiedName.get(importSpec);
+	if (fqnOwner && fqnOwner !== sourceModuleName) {
+		return fqnOwner;
+	}
+
+	const lastDot = importSpec.lastIndexOf('.');
+	const simpleName = lastDot >= 0 ? importSpec.slice(lastDot + 1) : importSpec;
+	const candidates = classIndex.bySimpleName.get(simpleName);
+	if (!candidates) {
+		return null;
+	}
+
+	const owners = Array.from(candidates).filter(name => name !== sourceModuleName);
+	if (owners.length === 1) {
+		return owners[0];
+	}
+
+	// Ambiguous: more than one module declares a class with this simple name.
+	// We cannot safely pick a target without proper symbol resolution, so leave
+	// it for JDTLS to flag.
+	return null;
+}
+
+const JAVA_IDENTIFIER_PATTERN = /^[a-zA-Z_][\w]*$/;
+
+export function extractFullyQualifiedCrossModuleReferences(
+	source: string,
+	moduleByName: Map<string, ModuleDependency>,
+	ownModuleName: string
+): FullyQualifiedCrossModuleReference[] {
+	const candidateModuleNames = Array.from(moduleByName.keys()).filter(
+		name => name !== ownModuleName && JAVA_IDENTIFIER_PATTERN.test(name)
+	);
+	if (candidateModuleNames.length === 0) {
+		return [];
+	}
+
+	const sanitized = stripJavaCommentsAndStrings(source);
+	const references: FullyQualifiedCrossModuleReference[] = [];
+	const seen = new Set<string>();
+
+	for (const moduleName of candidateModuleNames) {
+		const escaped = moduleName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		// Match `<moduleName>.<ClassName>` where the class name starts with an
+		// uppercase letter or underscore — this is the Java convention and avoids
+		// false positives like `backend.foo` package references.
+		const pattern = new RegExp(`(^|[^\\w.$])(${escaped})\\.([A-Z_][\\w$]*)`, 'g');
+
+		let match: RegExpExecArray | null;
+		while ((match = pattern.exec(sanitized)) !== null) {
+			const prefix = match[1] ?? '';
+			const moduleStart = match.index + prefix.length;
+			const className = match[3];
+			const importName = `${moduleName}.${className}`;
+			const endOffset = moduleStart + moduleName.length + 1 + className.length;
+
+			// Skip references that originate from a `package` declaration line.
+			const lineStart = sanitized.lastIndexOf('\n', moduleStart) + 1;
+			const lineHead = sanitized.slice(lineStart, moduleStart);
+			if (/\bpackage\s+$/.test(lineHead)) {
+				continue;
+			}
+			// Imports are already covered by extractJavaImportMatches — skip them here
+			// so we do not produce duplicates on the same line.
+			if (/\bimport\s+(static\s+)?$/.test(lineHead)) {
+				continue;
+			}
+
+			const dedupeKey = `${importName}::${moduleStart}`;
+			if (seen.has(dedupeKey)) {
+				continue;
+			}
+			seen.add(dedupeKey);
+
+			references.push({
+				importName,
+				targetModuleName: moduleName,
+				range: new vscode.Range(
+					offsetToPosition(source, moduleStart),
+					offsetToPosition(source, endOffset)
+				)
+			});
+		}
+	}
+
+	return references;
+}
+
+export function stripJavaCommentsAndStrings(source: string): string {
+	const length = source.length;
+	const out: string[] = new Array(length);
+	let index = 0;
+
+	const blank = (count: number): void => {
+		for (let offset = 0; offset < count; offset++) {
+			const character = source[index + offset];
+			out[index + offset] = character === '\n' || character === '\r' ? character : ' ';
+		}
+		index += count;
+	};
+
+	while (index < length) {
+		const current = source[index];
+		const next = source[index + 1];
+
+		if (current === '/' && next === '/') {
+			let end = index;
+			while (end < length && source[end] !== '\n' && source[end] !== '\r') {
+				end++;
+			}
+			blank(end - index);
+			continue;
+		}
+
+		if (current === '/' && next === '*') {
+			let end = index + 2;
+			while (end < length - 1 && !(source[end] === '*' && source[end + 1] === '/')) {
+				end++;
+			}
+			end = Math.min(end + 2, length);
+			blank(end - index);
+			continue;
+		}
+
+		if (current === '"' || current === '\'') {
+			const quote = current;
+			let end = index + 1;
+			while (end < length) {
+				if (source[end] === '\\' && end + 1 < length) {
+					end += 2;
+					continue;
+				}
+				if (source[end] === quote) {
+					end++;
+					break;
+				}
+				if (source[end] === '\n') {
+					break;
+				}
+				end++;
+			}
+			blank(end - index);
+			continue;
+		}
+
+		out[index] = current;
+		index++;
+	}
+
+	return out.join('');
 }
 
 function extractJavaImportMatches(source: string): JavaImportMatch[] {
