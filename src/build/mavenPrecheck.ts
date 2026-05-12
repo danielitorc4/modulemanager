@@ -4,7 +4,9 @@ import * as vscode from 'vscode';
 import { CONFIG_PATHS } from '../constants';
 
 const MAVEN_VERSION_ARGS = ['-v'];
-const MAVEN_VERSION_TIMEOUT_MS = 8_000;
+const MAVEN_VERSION_TIMEOUT_MS = 20_000;  // Increased from 8s to 20s for slow machines with antivirus
+const MAVEN_CHECK_RETRIES = 2;
+const MAVEN_RETRY_DELAY_MS = 500;
 
 type MavenExecutableSource = 'wrapper' | 'vscode-setting' | 'path';
 
@@ -153,32 +155,56 @@ function stripWrappingQuotes(value: string): string {
 }
 
 async function canExecuteMaven(command: string, cwd?: string): Promise<boolean> {
+	// Retry mechanism for better reliability on slow/heavily-loaded machines
+	for (let attempt = 0; attempt <= MAVEN_CHECK_RETRIES; attempt++) {
+		const result = await canExecuteMavenAttempt(command, cwd);
+		if (result) {
+			return true;
+		}
+
+		// If not the last attempt, wait before retrying
+		if (attempt < MAVEN_CHECK_RETRIES) {
+			await new Promise(resolve => setTimeout(resolve, MAVEN_RETRY_DELAY_MS));
+		}
+	}
+
+	return false;
+}
+
+async function canExecuteMavenAttempt(command: string, cwd?: string): Promise<boolean> {
 	return new Promise(resolve => {
 		const useShell = shouldUseShellForMavenCheck(command);
-		execFile(
-			command,
-			MAVEN_VERSION_ARGS,
-			{ cwd, windowsHide: true, timeout: MAVEN_VERSION_TIMEOUT_MS, shell: useShell },
-			(error, _stdout, stderr) => {
-				if (!error) {
-					resolve(true);
-					return;
-				}
+		const timeout = MAVEN_VERSION_TIMEOUT_MS;
 
-				const errno = (error as NodeJS.ErrnoException).code;
-				if (errno === 'ENOENT' || errno === 'EACCES' || errno === 'ENOEXEC') {
+		try {
+			execFile(
+				command,
+				MAVEN_VERSION_ARGS,
+				{ cwd, windowsHide: true, timeout, shell: useShell },
+				(error, _stdout, stderr) => {
+					if (!error) {
+						resolve(true);
+						return;
+					}
+
+					const errno = (error as NodeJS.ErrnoException).code;
+					if (errno === 'ENOENT' || errno === 'EACCES' || errno === 'ENOEXEC') {
+						resolve(false);
+						return;
+					}
+
+					if (process.platform === 'win32' && isWindowsCommandNotFound(stderr)) {
+						resolve(false);
+						return;
+					}
+
+					// ETIMEDOUT or other errors might indicate Maven is slow, not unavailable
 					resolve(false);
-					return;
 				}
-
-				if (process.platform === 'win32' && isWindowsCommandNotFound(stderr)) {
-					resolve(false);
-					return;
-				}
-
-				resolve(true);
-			}
-		);
+			);
+		} catch (error) {
+			resolve(false);
+		}
 	});
 }
 

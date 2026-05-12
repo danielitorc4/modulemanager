@@ -1,9 +1,9 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { REGEX } from '../constants';
-import { syncAllModules } from '../build/buildFileManager';
+import { reconcileWorkspaceModel } from '../build/buildFileManager';
 import { findModuleDescriptors, writeModuleDescriptor } from '../moduleDescriptors';
-import { resolveWorkspaceFolder } from '../utils/utils';
+import { resolveManagementRootUri } from '../workspace/managedWorkspace';
 
 interface ModuleDependency {
 	moduleName: string;
@@ -33,19 +33,26 @@ export interface DependencyViolation {
 interface JavaImportMatch {
 	importName: string;
 	range: vscode.Range;
+	isWildcard: boolean;
+	isStaticMethod: boolean;
+}
+
+interface ModuleClassIndex {
+	bySimpleName: Map<string, Set<string>>;
+	byFullyQualifiedName: Map<string, string>;
 }
 
 /**
  * Adds a dependency from one module to another.
  */
 export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length === 0) {
 		vscode.window.showWarningMessage('No modules found in the project.');
 		return;
@@ -102,7 +109,7 @@ export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<voi
 		await updateDescriptorDependencies(sourceModule.module.moduleUri, dependencies =>
 			Array.from(new Set([...dependencies, targetModule.module.moduleName]))
 		);
-		await syncAllModules(workspaceFolder.uri);
+		await reconcileWorkspaceModel(managementRootUri);
 
 		vscode.window.showInformationMessage(
 			`Added dependency: "${sourceModule.module.moduleName}" now depends on "${targetModule.module.moduleName}".`
@@ -116,13 +123,13 @@ export async function addModuleDependency(resourceUri?: vscode.Uri): Promise<voi
  * Removes a dependency from a module.
  */
 export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length === 0) {
 		vscode.window.showWarningMessage('No modules found in the project.');
 		return;
@@ -161,7 +168,7 @@ export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<
 		await updateDescriptorDependencies(selectedModule.module.moduleUri, dependencies =>
 			dependencies.filter(dependency => dependency !== dependencyToRemove.dependency)
 		);
-		await syncAllModules(workspaceFolder.uri);
+		await reconcileWorkspaceModel(managementRootUri);
 
 		vscode.window.showInformationMessage(
 			`Removed dependency: "${selectedModule.module.moduleName}" no longer depends on "${dependencyToRemove.dependency}".`
@@ -175,13 +182,13 @@ export async function removeModuleDependency(resourceUri?: vscode.Uri): Promise<
  * Shows all module dependencies in the project.
  */
 export async function showModuleDependencies(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length === 0) {
 		vscode.window.showWarningMessage('No modules found in the project.');
 		return;
@@ -223,19 +230,19 @@ export async function showModuleDependencies(resourceUri?: vscode.Uri): Promise<
  * Validates imports across modules and offers one-click fix to add missing dependencies.
  */
 export async function validateModuleDependencies(resourceUri?: vscode.Uri): Promise<void> {
-	const workspaceFolder = await resolveWorkspaceFolder(resourceUri);
-	if (!workspaceFolder) {
+	const managementRootUri = await resolveManagementRootUri(resourceUri);
+	if (!managementRootUri) {
 		vscode.window.showErrorMessage('No workspace folder open.');
 		return;
 	}
 
-	const modules = await getAllModules(workspaceFolder.uri);
+	const modules = await getAllModules(managementRootUri);
 	if (modules.length < 2) {
 		vscode.window.showInformationMessage('Not enough modules found to validate dependencies.');
 		return;
 	}
 
-	const missingDependencies = await findMissingDependencies(workspaceFolder.uri, modules);
+	const missingDependencies = await findMissingDependencies(managementRootUri, modules);
 	if (missingDependencies.length === 0) {
 		vscode.window.showInformationMessage('No missing module dependencies were detected.');
 		return;
@@ -244,7 +251,7 @@ export async function validateModuleDependencies(resourceUri?: vscode.Uri): Prom
 	const selected = await vscode.window.showQuickPick(
 		missingDependencies.map(item => ({
 			label: `${item.sourceModule} -> ${item.targetModule}`,
-			description: path.relative(workspaceFolder.uri.fsPath, item.filePath),
+			description: path.relative(managementRootUri.fsPath, item.filePath),
 			detail: `Import: ${item.importName}`,
 			item
 		})),
@@ -275,7 +282,7 @@ export async function validateModuleDependencies(resourceUri?: vscode.Uri): Prom
 		await updateDescriptorDependencies(sourceModule.moduleUri, dependencies =>
 			Array.from(new Set([...dependencies, selected.item.targetModule]))
 		);
-		await syncAllModules(workspaceFolder.uri);
+		await reconcileWorkspaceModel(managementRootUri);
 
 		vscode.window.showInformationMessage(
 			`Added dependency: "${selected.item.sourceModule}" now depends on "${selected.item.targetModule}".`
@@ -296,19 +303,64 @@ export async function collectJavaDependencyViolations(workspaceUri: vscode.Uri):
 		moduleByName.set(module.moduleName, module);
 	}
 
+	const filesByModule = new Map<string, vscode.Uri[]>();
+	for (const module of modules) {
+		const sourceRootUri = vscode.Uri.file(path.join(workspaceUri.fsPath, module.modulePath));
+		const pattern = new vscode.RelativePattern(sourceRootUri, 'src/**/*.java');
+		filesByModule.set(module.moduleName, await vscode.workspace.findFiles(pattern));
+	}
+
+	const classIndex = await buildModuleClassIndex(modules, filesByModule);
+
 	const violations: DependencyViolation[] = [];
+	const seenKeys = new Set<string>();
+
+	const recordViolation = (
+		file: vscode.Uri,
+		importName: string,
+		sourceModule: ModuleDependency,
+		targetModule: ModuleDependency,
+		range: vscode.Range
+	): void => {
+		const key = `${file.toString()}::${sourceModule.moduleName}::${targetModule.moduleName}::${importName}::${range.start.line}:${range.start.character}`;
+		if (seenKeys.has(key)) {
+			return;
+		}
+		seenKeys.add(key);
+		violations.push({
+			fileUri: file,
+			importName,
+			sourceModule: sourceModule.moduleName,
+			sourceModulePath: sourceModule.modulePath,
+			targetModule: targetModule.moduleName,
+			range
+		});
+	};
 
 	for (const sourceModule of modules) {
-		const sourceRootUri = vscode.Uri.file(path.join(workspaceUri.fsPath, sourceModule.modulePath));
-		const pattern = new vscode.RelativePattern(sourceRootUri, 'src/**/*.java');
-		const files = await vscode.workspace.findFiles(pattern);
+		const files = filesByModule.get(sourceModule.moduleName) ?? [];
 
 		for (const file of files) {
 			const content = Buffer.from(await vscode.workspace.fs.readFile(file)).toString();
 			const imports = extractJavaImportMatches(content);
 
 			for (const importMatch of imports) {
-				const targetModuleName = extractJavaModuleName(importMatch.importName, moduleByName);
+				// Skip wildcard imports - we cannot determine which classes are imported
+				if (importMatch.isWildcard) {
+					continue;
+				}
+
+				// Skip static method imports - these are not class dependencies
+				if (importMatch.isStaticMethod) {
+					continue;
+				}
+
+				const targetModuleName = resolveTargetModule(
+					importMatch.importName,
+					moduleByName,
+					classIndex,
+					sourceModule.moduleName
+				);
 				if (!targetModuleName || targetModuleName === sourceModule.moduleName) {
 					continue;
 				}
@@ -318,14 +370,25 @@ export async function collectJavaDependencyViolations(workspaceUri: vscode.Uri):
 					continue;
 				}
 
-				violations.push({
-					fileUri: file,
-					importName: importMatch.importName,
-					sourceModule: sourceModule.moduleName,
-					sourceModulePath: sourceModule.modulePath,
-					targetModule: targetModule.moduleName,
-					range: importMatch.range
-				});
+				recordViolation(file, importMatch.importName, sourceModule, targetModule, importMatch.range);
+			}
+
+			// Also flag fully-qualified cross-module references that appear in
+			// code without a matching import statement. Eclipse's access-rule
+			// enforcement on the classpath is the authoritative check, but
+			// JDTLS does not always propagate forbidden-reference diagnostics to
+			// VS Code, so we publish our own and rely on the boundary blocker
+			// file to break the build.
+			const fqnReferences = extractFullyQualifiedCrossModuleReferences(content, moduleByName, sourceModule.moduleName);
+			for (const reference of fqnReferences) {
+				if (sourceModule.dependencies.includes(reference.targetModuleName)) {
+					continue;
+				}
+				const targetModule = moduleByName.get(reference.targetModuleName);
+				if (!targetModule) {
+					continue;
+				}
+				recordViolation(file, reference.importName, sourceModule, targetModule, reference.range);
 			}
 		}
 	}
@@ -352,7 +415,12 @@ async function updateDescriptorDependencies(
 		throw new Error('No workspace folder found for module');
 	}
 
-	const modules = await findModuleDescriptors(workspaceFolder.uri);
+	const managementRootUri = await resolveManagementRootUri(moduleUri);
+	if (!managementRootUri) {
+		throw new Error('No managed workspace root available');
+	}
+
+	const modules = await findModuleDescriptors(managementRootUri);
 	const descriptorEntry = modules.find(module => module.moduleUri.fsPath === moduleUri.fsPath);
 	if (!descriptorEntry) {
 		throw new Error('Module descriptor not found');
@@ -533,19 +601,244 @@ export function extractJavaImportSpecifiers(source: string): string[] {
 
 	REGEX.JAVA_IMPORT.lastIndex = 0;
 	while ((match = REGEX.JAVA_IMPORT.exec(source)) !== null) {
-		const importName = match[1]?.trim();
-		if (!importName) {
+		// match[1] = "static " or undefined, match[2] = the actual import path
+		const importPath = match[2]?.trim();
+		if (!importPath) {
 			continue;
 		}
 
-		if (importName.startsWith('java.') || importName.startsWith('javax.')) {
+		if (importPath.startsWith('java.') || importPath.startsWith('javax.')) {
 			continue;
 		}
 
+		// Strip wildcard suffix so module-name extraction works on "com.foo.*"
+		const importName = importPath.endsWith('.*') ? importPath.slice(0, -2) : importPath;
 		specifiers.add(importName);
 	}
 
 	return Array.from(specifiers);
+}
+
+interface FullyQualifiedCrossModuleReference {
+	importName: string;
+	targetModuleName: string;
+	range: vscode.Range;
+}
+
+const JAVA_PACKAGE_DECLARATION_REGEX = /^\s*package\s+([a-zA-Z_][\w.]*)\s*;/m;
+const JAVA_TYPE_DECLARATION_REGEX = /(?:^|[\s;{}])(?:public\s+|private\s+|protected\s+|abstract\s+|final\s+|sealed\s+|non-sealed\s+|static\s+|strictfp\s+|@interface\s+)*(?:class|interface|enum|record)\s+([A-Za-z_][\w$]*)/g;
+
+async function buildModuleClassIndex(
+	modules: ModuleDependency[],
+	filesByModule: Map<string, vscode.Uri[]>
+): Promise<ModuleClassIndex> {
+	const bySimpleName = new Map<string, Set<string>>();
+	const byFullyQualifiedName = new Map<string, string>();
+
+	for (const module of modules) {
+		const files = filesByModule.get(module.moduleName) ?? [];
+		for (const file of files) {
+			const raw = Buffer.from(await vscode.workspace.fs.readFile(file)).toString();
+			const sanitized = stripJavaCommentsAndStrings(raw);
+
+			const packageMatch = sanitized.match(JAVA_PACKAGE_DECLARATION_REGEX);
+			const packageName = packageMatch?.[1] ?? '';
+
+			JAVA_TYPE_DECLARATION_REGEX.lastIndex = 0;
+			let typeMatch: RegExpExecArray | null;
+			while ((typeMatch = JAVA_TYPE_DECLARATION_REGEX.exec(sanitized)) !== null) {
+				const simpleName = typeMatch[1];
+				if (!simpleName) {
+					continue;
+				}
+
+				const fullyQualifiedName = packageName ? `${packageName}.${simpleName}` : simpleName;
+
+				const owners = bySimpleName.get(simpleName) ?? new Set<string>();
+				owners.add(module.moduleName);
+				bySimpleName.set(simpleName, owners);
+
+				// First declaration wins for FQN — duplicates would be a compile
+				// error anyway and would not be silently swapped.
+				if (!byFullyQualifiedName.has(fullyQualifiedName)) {
+					byFullyQualifiedName.set(fullyQualifiedName, module.moduleName);
+				}
+			}
+		}
+	}
+
+	return { bySimpleName, byFullyQualifiedName };
+}
+
+function resolveTargetModule(
+	importSpec: string,
+	moduleByName: Map<string, ModuleDependency>,
+	classIndex: ModuleClassIndex,
+	sourceModuleName: string
+): string | null {
+	// Convention-based prefix match still wins when it works — keeps the legacy
+	// "package starts with module name" behaviour intact for projects that
+	// follow it.
+	const prefixMatch = extractJavaModuleName(importSpec, moduleByName);
+	if (prefixMatch && prefixMatch !== sourceModuleName) {
+		return prefixMatch;
+	}
+
+	// Authoritative match: a class declared inside another module is owned by
+	// that module regardless of which package the file happens to declare. This
+	// catches files placed in unconventional packages — including JDTLS
+	// path-inferred packages like `main.java.Foo` when the .classpath source
+	// root was guessed wrong by an external tool.
+	const fqnOwner = classIndex.byFullyQualifiedName.get(importSpec);
+	if (fqnOwner && fqnOwner !== sourceModuleName) {
+		return fqnOwner;
+	}
+
+	const lastDot = importSpec.lastIndexOf('.');
+	const simpleName = lastDot >= 0 ? importSpec.slice(lastDot + 1) : importSpec;
+	const candidates = classIndex.bySimpleName.get(simpleName);
+	if (!candidates) {
+		return null;
+	}
+
+	const owners = Array.from(candidates).filter(name => name !== sourceModuleName);
+	if (owners.length === 1) {
+		return owners[0];
+	}
+
+	// Ambiguous: more than one module declares a class with this simple name.
+	// We cannot safely pick a target without proper symbol resolution, so leave
+	// it for JDTLS to flag.
+	return null;
+}
+
+const JAVA_IDENTIFIER_PATTERN = /^[a-zA-Z_][\w]*$/;
+
+export function extractFullyQualifiedCrossModuleReferences(
+	source: string,
+	moduleByName: Map<string, ModuleDependency>,
+	ownModuleName: string
+): FullyQualifiedCrossModuleReference[] {
+	const candidateModuleNames = Array.from(moduleByName.keys()).filter(
+		name => name !== ownModuleName && JAVA_IDENTIFIER_PATTERN.test(name)
+	);
+	if (candidateModuleNames.length === 0) {
+		return [];
+	}
+
+	const sanitized = stripJavaCommentsAndStrings(source);
+	const references: FullyQualifiedCrossModuleReference[] = [];
+	const seen = new Set<string>();
+
+	for (const moduleName of candidateModuleNames) {
+		const escaped = moduleName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		// Match `<moduleName>.<ClassName>` where the class name starts with an
+		// uppercase letter or underscore — this is the Java convention and avoids
+		// false positives like `backend.foo` package references.
+		const pattern = new RegExp(`(^|[^\\w.$])(${escaped})\\.([A-Z_][\\w$]*)`, 'g');
+
+		let match: RegExpExecArray | null;
+		while ((match = pattern.exec(sanitized)) !== null) {
+			const prefix = match[1] ?? '';
+			const moduleStart = match.index + prefix.length;
+			const className = match[3];
+			const importName = `${moduleName}.${className}`;
+			const endOffset = moduleStart + moduleName.length + 1 + className.length;
+
+			// Skip references that originate from a `package` declaration line.
+			const lineStart = sanitized.lastIndexOf('\n', moduleStart) + 1;
+			const lineHead = sanitized.slice(lineStart, moduleStart);
+			if (/\bpackage\s+$/.test(lineHead)) {
+				continue;
+			}
+			// Imports are already covered by extractJavaImportMatches — skip them here
+			// so we do not produce duplicates on the same line.
+			if (/\bimport\s+(static\s+)?$/.test(lineHead)) {
+				continue;
+			}
+
+			const dedupeKey = `${importName}::${moduleStart}`;
+			if (seen.has(dedupeKey)) {
+				continue;
+			}
+			seen.add(dedupeKey);
+
+			references.push({
+				importName,
+				targetModuleName: moduleName,
+				range: new vscode.Range(
+					offsetToPosition(source, moduleStart),
+					offsetToPosition(source, endOffset)
+				)
+			});
+		}
+	}
+
+	return references;
+}
+
+export function stripJavaCommentsAndStrings(source: string): string {
+	const length = source.length;
+	const out: string[] = new Array(length);
+	let index = 0;
+
+	const blank = (count: number): void => {
+		for (let offset = 0; offset < count; offset++) {
+			const character = source[index + offset];
+			out[index + offset] = character === '\n' || character === '\r' ? character : ' ';
+		}
+		index += count;
+	};
+
+	while (index < length) {
+		const current = source[index];
+		const next = source[index + 1];
+
+		if (current === '/' && next === '/') {
+			let end = index;
+			while (end < length && source[end] !== '\n' && source[end] !== '\r') {
+				end++;
+			}
+			blank(end - index);
+			continue;
+		}
+
+		if (current === '/' && next === '*') {
+			let end = index + 2;
+			while (end < length - 1 && !(source[end] === '*' && source[end + 1] === '/')) {
+				end++;
+			}
+			end = Math.min(end + 2, length);
+			blank(end - index);
+			continue;
+		}
+
+		if (current === '"' || current === '\'') {
+			const quote = current;
+			let end = index + 1;
+			while (end < length) {
+				if (source[end] === '\\' && end + 1 < length) {
+					end += 2;
+					continue;
+				}
+				if (source[end] === quote) {
+					end++;
+					break;
+				}
+				if (source[end] === '\n') {
+					break;
+				}
+				end++;
+			}
+			blank(end - index);
+			continue;
+		}
+
+		out[index] = current;
+		index++;
+	}
+
+	return out.join('');
 }
 
 function extractJavaImportMatches(source: string): JavaImportMatch[] {
@@ -554,26 +847,51 @@ function extractJavaImportMatches(source: string): JavaImportMatch[] {
 
 	REGEX.JAVA_IMPORT.lastIndex = 0;
 	while ((match = REGEX.JAVA_IMPORT.exec(source)) !== null) {
-		const importName = match[1]?.trim();
-		if (!importName) {
+		// match[1] = "static" or undefined
+		// match[2] = import path (com.foo.Bar or com.foo.* or com.foo.Outer$Inner)
+		const isStaticKeyword = !!match[1];
+		const importPath = match[2]?.trim();
+		
+		if (!importPath) {
 			continue;
 		}
 
-		if (importName.startsWith('java.') || importName.startsWith('javax.')) {
+		// Skip java.* and javax.* imports
+		if (importPath.startsWith('java.') || importPath.startsWith('javax.')) {
 			continue;
 		}
+
+		const isWildcard = importPath.endsWith('.*');
+		let importName = importPath;
+		
+		if (isWildcard) {
+			// For wildcard imports like "com.foo.*", extract the package
+			importName = importPath.slice(0, -2); // Remove ".*"
+		}
+
+		// Detect if this is a static method import (e.g., "static com.foo.Utils.method")
+		// In Java, static imports can be:
+		// - import static com.foo.Utils.method; (specific method)
+		// - import static com.foo.Utils.*; (all static members)
+		// We'll flag these as isStaticMethod if they have more than 3 segments
+		// com.foo.Utils.method has 4 segments (likely a method)
+		const segments = importName.split('.');
+		const isStaticMethod = isStaticKeyword && segments.length > 3;
 
 		const matchText = match[0] ?? '';
-		const nameIndexWithinMatch = matchText.indexOf(importName);
+		const nameIndexWithinMatch = matchText.indexOf(importPath.replace(/\.\*$/, ''));
 		if (nameIndexWithinMatch < 0) {
 			continue;
 		}
 
 		const startOffset = match.index + nameIndexWithinMatch;
 		const endOffset = startOffset + importName.length;
+		
 		matches.push({
 			importName,
-			range: new vscode.Range(offsetToPosition(source, startOffset), offsetToPosition(source, endOffset))
+			range: new vscode.Range(offsetToPosition(source, startOffset), offsetToPosition(source, endOffset)),
+			isWildcard,
+			isStaticMethod
 		});
 	}
 
@@ -589,28 +907,37 @@ function offsetToPosition(source: string, offset: number): vscode.Position {
 	return new vscode.Position(line, character);
 }
 
+/**
+ * Extracts module name from a Java import statement.
+ * Uses longest-match strategy to handle nested module packages correctly.
+ * Cache is built per-invocation to avoid stale lookups.
+ */
 export function extractJavaModuleName(
 	importSpecifier: string,
 	moduleByName: Map<string, ModuleDependency>
 ): string | null {
+	// Build a sorted list of module names by length (longest first)
+	// This ensures "core.utils" is matched before "core" for import "com.myapp.core.utils"
+	const modulesByLength = Array.from(moduleByName.keys()).sort((a, b) => b.length - a.length);
+
 	let bestMatch: string | null = null;
 	let bestScore = -1;
 
-	for (const moduleName of moduleByName.keys()) {
-		const directPrefix = `${moduleName}.`;
-		const nestedSegment = `.${moduleName}.`;
-		const isDirectMatch = importSpecifier === moduleName || importSpecifier.startsWith(directPrefix);
-		const isNestedSegmentMatch =
-			importSpecifier.includes(nestedSegment) || importSpecifier.endsWith(`.${moduleName}`);
-
-		const score = isDirectMatch ? 2 : isNestedSegmentMatch ? 1 : 0;
-		if (score === 0) {
-			continue;
+	for (const moduleName of modulesByLength) {
+		// Exact match: import name IS the module name
+		if (importSpecifier === moduleName) {
+			return moduleName;
 		}
 
-		if (score > bestScore || (score === bestScore && (!bestMatch || moduleName.length > bestMatch.length))) {
-			bestMatch = moduleName;
-			bestScore = score;
+		// Direct prefix match: import.startsWith(moduleName + ".")
+		// Example: import "com.myapp.core.User" matches module "com.myapp.core"
+		const directPrefix = `${moduleName}.`;
+		if (importSpecifier.startsWith(directPrefix)) {
+			// Verify there's a valid class name after the prefix
+			const afterPrefix = importSpecifier.slice(directPrefix.length);
+			if (afterPrefix && /^[a-zA-Z_][\w$]*$/.test(afterPrefix.split('.')[0])) {
+				return moduleName; // Return immediately since we sorted by length
+			}
 		}
 	}
 
